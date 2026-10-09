@@ -1,0 +1,88 @@
+{
+  "info": {
+    "_postman_id": "7b134d19-5832-4d23-9562-b430d4e9fe9a",
+    "name": "Fuel Route Optimizer API",
+    "description": "API collection for Spotter Backend Assessment: Driving Route Fuel Optimization within the US.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Short Journey (<500 mi, No Stops) - LA to Las Vegas",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"Los Angeles, CA\",\n  \"finish\": \"Las Vegas, NV\",\n  \"starting_fuel_gallons\": 50.0\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/route-plan/",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "route-plan", ""]
+        }
+      }
+    },
+    {
+      "name": "2. Medium Journey (>500 mi, Refueling Required) - LA to Salt Lake City",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"Los Angeles, CA\",\n  \"finish\": \"Salt Lake City, UT\",\n  \"starting_fuel_gallons\": 50.0\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/route-plan/",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "route-plan", ""]
+        }
+      }
+    },
+    {
+      "name": "3. Long Multi-Stop Journey (>1000 mi) - New York to Miami",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"New York, NY\",\n  \"finish\": \"Miami, FL\",\n  \"starting_fuel_gallons\": 50.0\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/route-plan/",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "route-plan", ""]
+        }
+      }
+    },
+    {
+      "name": "4. Coordinate-based Input - Chicago to St. Louis",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"41.8781, -87.6298\",\n  \"finish\": \"38.6270, -90.1994\",\n  \"starting_fuel_gallons\": 20.0\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/route-plan/",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "route-plan", ""]
+        }
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000"
+    }
+  ]
+}
