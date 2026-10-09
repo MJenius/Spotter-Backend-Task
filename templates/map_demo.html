@@ -89,6 +89,16 @@
 
         let routeLayerGroup = L.layerGroup().addTo(map);
 
+        function escapeHtml(str) {
+            if (str === null || str === undefined) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
         function setPreset(start, finish, fuel) {
             document.getElementById('startInput').value = start;
             document.getElementById('finishInput').value = finish;
@@ -101,7 +111,9 @@
             const resultsDiv = document.getElementById('results');
             const start = document.getElementById('startInput').value.trim();
             const finish = document.getElementById('finishInput').value.trim();
-            const startingFuel = parseFloat(document.getElementById('startingFuel').value) || 50.0;
+            const rawFuel = document.getElementById('startingFuel').value.trim();
+            const parsedFuel = parseFloat(rawFuel);
+            const startingFuel = (!isNaN(parsedFuel) && parsedFuel >= 0 && parsedFuel <= 50) ? parsedFuel : 50.0;
 
             const allowApprox = document.getElementById('allowApprox').checked;
 
@@ -129,14 +141,14 @@
 
                 const data = await response.json();
                 if (!response.ok || !data.success) {
-                    const err = data.error || (data.errors ? JSON.stringify(data.errors) : 'Route calculation failed');
-                    resultsDiv.innerHTML = `<div class="alert alert-error"><strong>Error:</strong> ${err}</div>`;
+                    const err = data.error || (data.errors ? JSON.stringify(data.errors) : (data.message || 'Route calculation failed'));
+                    resultsDiv.innerHTML = `<div class="alert alert-error"><strong>Error:</strong> ${escapeHtml(err)}</div>`;
                     return;
                 }
 
                 renderResults(data);
             } catch (e) {
-                resultsDiv.innerHTML = `<div class="alert alert-error"><strong>Connection Error:</strong> ${e.message}</div>`;
+                resultsDiv.innerHTML = `<div class="alert alert-error"><strong>Connection Error:</strong> ${escapeHtml(e.message)}</div>`;
             } finally {
                 btn.disabled = false;
                 btn.innerText = 'Calculate Fuel Route';
@@ -146,7 +158,7 @@
         function renderResults(data) {
             const resultsDiv = document.getElementById('results');
             const route = data.route;
-            const stops = data.fuel_stops;
+            const stops = data.fuel_stops || [];
 
             // Render route GeoJSON
             const geojsonLayer = L.geoJSON(route.geometry, {
@@ -159,14 +171,14 @@
             if (data.start && data.start.coordinates) {
                 L.circleMarker([data.start.coordinates[1], data.start.coordinates[0]], {
                     radius: 8, fillColor: '#16a34a', color: '#ffffff', weight: 2, fillOpacity: 1
-                }).bindPopup(`<b>Start</b><br>${data.start.label}`).addTo(routeLayerGroup);
+                }).bindPopup(`<b>Start</b><br>${escapeHtml(data.start.label)}`).addTo(routeLayerGroup);
             }
 
             // Finish marker
             if (data.finish && data.finish.coordinates) {
                 L.circleMarker([data.finish.coordinates[1], data.finish.coordinates[0]], {
                     radius: 8, fillColor: '#dc2626', color: '#ffffff', weight: 2, fillOpacity: 1
-                }).bindPopup(`<b>Destination</b><br>${data.finish.label}`).addTo(routeLayerGroup);
+                }).bindPopup(`<b>Destination</b><br>${escapeHtml(data.finish.label)}`).addTo(routeLayerGroup);
             }
 
             // Fuel stops
@@ -176,11 +188,12 @@
                 }).addTo(routeLayerGroup);
 
                 marker.bindPopup(`
-                    <b>Stop #${s.sequence}: ${s.name}</b><br>
-                    ${s.address}, ${s.city}, ${s.state}<br>
-                    <b>Price:</b> $${s.price_per_gallon.toFixed(3)}/gal<br>
-                    <b>Purchase:</b> ${s.gallons_to_purchase} gal ($${s.purchase_cost_usd.toFixed(2)})<br>
-                    <b>Route Position:</b> Mile ${s.route_position_miles}
+                    <b>Stop #${escapeHtml(s.sequence)}: ${escapeHtml(s.name)}</b><br>
+                    ${escapeHtml(s.address)}, ${escapeHtml(s.city)}, ${escapeHtml(s.state)}<br>
+                    <b>Price:</b> $${escapeHtml(Number(s.price_per_gallon).toFixed(3))}/gal<br>
+                    <b>Purchase:</b> ${escapeHtml(s.gallons_to_purchase)} gal ($${escapeHtml(Number(s.purchase_cost_usd).toFixed(2))})<br>
+                    <b>Route Position:</b> Mile ${escapeHtml(s.route_position_miles)}<br>
+                    <small>Accuracy: ${escapeHtml(s.geocode_accuracy)}</small>
                 `);
             });
 
@@ -189,24 +202,24 @@
                 <div class="stat-card">
                     <div style="font-weight:700; color:#0f172a; font-size:0.95rem;">Journey Summary</div>
                     <div class="stat-grid">
-                        <div class="stat-item">Total Distance<div class="stat-value">${route.distance_miles} mi</div></div>
-                        <div class="stat-item">Fuel Consumed<div class="stat-value">${data.fuel_consumed_gallons} gal</div></div>
-                        <div class="stat-item">Recommended Stops<div class="stat-value">${stops.length}</div></div>
-                        <div class="stat-item">Total Purchase Cost<div class="stat-value" style="color:#16a34a;">$${data.total_fuel_cost_usd.toFixed(2)}</div></div>
+                        <div class="stat-item">Total Distance<div class="stat-value">${escapeHtml(route.distance_miles)} mi</div></div>
+                        <div class="stat-item">Fuel Consumed<div class="stat-value">${escapeHtml(data.fuel_consumed_gallons)} gal</div></div>
+                        <div class="stat-item">Recommended Stops<div class="stat-value">${escapeHtml(stops.length)}</div></div>
+                        <div class="stat-item">Total Purchase Cost<div class="stat-value" style="color:#16a34a;">$${escapeHtml(Number(data.total_fuel_cost_usd).toFixed(2))}</div></div>
                     </div>
                 </div>
             `;
 
             if (stops.length === 0) {
-                html += `<div class="alert alert-info">No refueling required. The entire trip is reachable with starting fuel (${data.summary.starting_fuel_gallons} gal).</div>`;
+                html += `<div class="alert alert-info">No refueling required. The entire trip is reachable with starting fuel (${escapeHtml(data.summary.starting_fuel_gallons)} gal).</div>`;
             } else {
                 html += `<div style="font-size:0.8rem; font-weight:700; text-transform:uppercase; color:#64748b; margin-bottom:8px;">Planned Fuel Stops</div>`;
                 stops.forEach(s => {
                     html += `
                         <div class="stop-card">
-                            <div class="stop-title">#${s.sequence} ${s.name}</div>
-                            <div class="stop-detail">${s.city}, ${s.state} &bull; Mile ${s.route_position_miles}</div>
-                            <div class="stop-badge">$${s.price_per_gallon.toFixed(3)}/gal &bull; Buy ${s.gallons_to_purchase} gal ($${s.purchase_cost_usd.toFixed(2)})</div>
+                            <div class="stop-title">#${escapeHtml(s.sequence)} ${escapeHtml(s.name)}</div>
+                            <div class="stop-detail">${escapeHtml(s.city)}, ${escapeHtml(s.state)} &bull; Mile ${escapeHtml(s.route_position_miles)}</div>
+                            <div class="stop-badge">$${escapeHtml(Number(s.price_per_gallon).toFixed(3))}/gal &bull; Buy ${escapeHtml(s.gallons_to_purchase)} gal ($${escapeHtml(Number(s.purchase_cost_usd).toFixed(2))}) &bull; ${escapeHtml(s.geocode_accuracy)}</div>
                         </div>
                     `;
                 });

@@ -23,8 +23,9 @@ if not DEBUG and (not SECRET_KEY or 'django-insecure' in SECRET_KEY):
 
 raw_allowed_hosts = os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost')
 ALLOWED_HOSTS = [h.strip() for h in raw_allowed_hosts.split(',') if h.strip()]
-if 'testserver' not in ALLOWED_HOSTS:
-    ALLOWED_HOSTS.append('testserver')
+if DEBUG or os.environ.get('PYTEST_CURRENT_TEST'):
+    if 'testserver' not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append('testserver')
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -90,6 +91,14 @@ REST_FRAMEWORK = {
         'rest_framework.renderers.JSONRenderer',
         'rest_framework.renderers.BrowsableAPIRenderer',
     ],
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': os.environ.get('REST_ANON_THROTTLE_RATE', '60/minute'),
+        'user': os.environ.get('REST_USER_THROTTLE_RATE', '120/minute'),
+    },
     'EXCEPTION_HANDLER': 'fuel_planner.views.custom_exception_handler',
 }
 

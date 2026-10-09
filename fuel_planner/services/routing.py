@@ -81,15 +81,15 @@ class RoutingProvider:
             geometry = feature.get('geometry', {})
             legs_raw = feature['properties'].get('segments', [])
 
-            # Extract leg distances in miles
+            # Extract full-precision leg distances in miles
             leg_distances = [
-                round(seg['distance'] * METERS_TO_MILES, 2)
+                seg['distance'] * METERS_TO_MILES
                 for seg in legs_raw
             ]
 
             result = {
-                'distance_miles': round(distance_miles, 2),
-                'duration_hours': round(duration_seconds / 3600.0, 2),
+                'distance_miles': distance_miles,
+                'duration_hours': duration_seconds / 3600.0,
                 'geometry': geometry,
                 'legs': legs_raw,
                 'leg_distances_miles': leg_distances,

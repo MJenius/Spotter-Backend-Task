@@ -153,6 +153,24 @@ class RoutePlanningService:
                         'routing_provider_calls': self.routing_provider.call_count
                     }
 
+                # Critical reconciliation requirement:
+                # The returned road geometry drives through the provisional waypoints.
+                # If recomputing fuel purchases on actual leg distances drops any provisional stop,
+                # the returned geometry would include unneeded stops/detours. Within the 2-directions-call
+                # budget, we reject such discrepancies rather than returning a mismatched route.
+                provisional_ids = [s.station_id for s in opt_result.fuel_stops]
+                final_ids = [s.station_id for s in recomputed_result.fuel_stops]
+                if provisional_ids != final_ids:
+                    return {
+                        'success': False,
+                        'error': (
+                            "Route refinement discrepancy: Recomputation on actual road legs altered the optimal "
+                            f"fuel stop sequence (provisional: {provisional_ids}, recomputed: {final_ids}). "
+                            "Cannot reconcile geometry and stop list within the two-routing-call budget."
+                        ),
+                        'routing_provider_calls': self.routing_provider.call_count
+                    }
+
                 final_opt_result = recomputed_result
 
             except RoutingError as e:
@@ -194,8 +212,8 @@ class RoutePlanningService:
             'start': {'label': start_label, 'coordinates': [start_lon, start_lat]},
             'finish': {'label': finish_label, 'coordinates': [finish_lon, finish_lat]},
             'route': {
-                'distance_miles': total_distance,
-                'duration_hours': final_route.get('duration_hours', 0.0),
+                'distance_miles': round(total_distance, 2),
+                'duration_hours': round(final_route.get('duration_hours', 0.0), 2),
                 'geometry': final_route['geometry'],
                 'legs': final_route.get('legs', []),
             },
@@ -241,13 +259,15 @@ class RoutePlanningService:
             return lon, lat, f"{label_prefix.title()} ({lat:.4f}, {lon:.4f})"
 
         if isinstance(loc, str):
-            if ',' in loc:
-                parts = [p.strip() for p in loc.split(',')]
+            loc_str = loc.strip()
+            if ',' in loc_str:
+                parts = [p.strip() for p in loc_str.split(',')]
                 if len(parts) == 2:
                     try:
                         lat, lon = float(parts[0]), float(parts[1])
-                        if self.geocoding_service.is_in_us(lat, lon):
-                            return lon, lat, f"{label_prefix.title()} ({lat:.4f}, {lon:.4f})"
+                        if not self.geocoding_service.is_in_us(lat, lon):
+                            raise GeocodingError(f"{label_prefix.title()} coordinates ({lat}, {lon}) are outside the United States.")
+                        return lon, lat, f"{label_prefix.title()} ({lat:.4f}, {lon:.4f})"
                     except ValueError:
                         pass
             return self.geocoding_service.geocode(loc)

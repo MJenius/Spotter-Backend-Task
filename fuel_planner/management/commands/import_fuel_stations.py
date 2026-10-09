@@ -2,7 +2,10 @@ import csv
 import logging
 from decimal import Decimal
 from pathlib import Path
-from django.core.management.base import BaseCommand
+from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
+from django.core.management.base import BaseCommand, CommandError
 from fuel_planner.models import FuelStation
 
 logger = logging.getLogger(__name__)
@@ -21,14 +24,14 @@ class Command(BaseCommand):
         parser.add_argument(
             '--csv-path',
             type=str,
-            default='data/fuel-prices-for-be-assessment.csv',
-            help='Path to fuel prices CSV'
+            default=None,
+            help='Path to fuel prices CSV (defaults to BASE_DIR/data/fuel-prices-for-be-assessment.csv)'
         )
         parser.add_argument(
             '--cities-path',
             type=str,
-            default='data_cities.csv',
-            help='Path to US cities coordinates CSV'
+            default=None,
+            help='Path to US cities coordinates CSV (defaults to BASE_DIR/data_cities.csv)'
         )
         parser.add_argument(
             '--clear',
@@ -37,17 +40,29 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        csv_path = Path(options['csv_path'])
-        cities_path = Path(options['cities_path'])
-        if not csv_path.exists():
-            csv_path = Path('fuel-prices-for-be-assessment.csv')
-            if not csv_path.exists():
-                self.stderr.write(self.style.ERROR(f"CSV file not found at {options['csv_path']}"))
-                return
+        base_dir = Path(settings.BASE_DIR)
 
-        if options['clear']:
-            deleted_count, _ = FuelStation.objects.all().delete()
-            self.stdout.write(f"Cleared {deleted_count} existing records.")
+        raw_csv = options.get('csv_path')
+        if raw_csv:
+            csv_path = Path(raw_csv) if Path(raw_csv).is_absolute() else base_dir / raw_csv
+        else:
+            csv_path = base_dir / 'data' / 'fuel-prices-for-be-assessment.csv'
+            if not csv_path.exists():
+                csv_path = base_dir / 'fuel-prices-for-be-assessment.csv'
+
+        raw_cities = options.get('cities_path')
+        if raw_cities:
+            cities_path = Path(raw_cities) if Path(raw_cities).is_absolute() else base_dir / raw_cities
+        else:
+            cities_path = base_dir / 'data_cities.csv'
+
+        if not csv_path.exists():
+            raise CommandError(f"Fuel prices CSV file not found at: {csv_path}")
+
+        with transaction.atomic():
+            if options['clear']:
+                deleted_count, _ = FuelStation.objects.all().delete()
+                self.stdout.write(f"Cleared {deleted_count} existing records.")
 
         # Load city coordinates
         cities_map = {}
@@ -139,6 +154,7 @@ class Command(BaseCommand):
                     st.geocode_status = geocode_status
                     st.provenance = provenance
                     st.is_active = (geocode_status != FuelStation.GEOCODE_UNRESOLVED)
+                    st.updated_at = timezone.now()
                     stations_to_update.append(st)
                     updated_count += 1
                 else:
@@ -165,7 +181,7 @@ class Command(BaseCommand):
         if stations_to_update:
             FuelStation.objects.bulk_update(
                 stations_to_update,
-                fields=['retail_price', 'name', 'address', 'city', 'state', 'rack_id', 'latitude', 'longitude', 'geocode_status', 'provenance', 'is_active'],
+                fields=['retail_price', 'name', 'address', 'city', 'state', 'rack_id', 'latitude', 'longitude', 'geocode_status', 'provenance', 'is_active', 'updated_at'],
                 batch_size=1000
             )
 

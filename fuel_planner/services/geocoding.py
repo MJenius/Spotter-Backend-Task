@@ -108,68 +108,41 @@ class GeocodingService:
 
     def is_in_us(self, lat: float, lon: float, country_code: Optional[str] = None) -> bool:
         """
-        Geospatial US validation using US boundary polygon and border reverse metadata:
-        1. If country_code from provider is known, check USA.
-        2. Alaska (51.0°N to 71.5°N, -180.0°W to -129.0°W).
-        3. Hawaii (18.5°N to 22.5°N, -160.5°W to -154.5°W).
-        4. Polygon check via US boundary GeoJSON.
-        5. Specific exclusion for cross-border neighbors (Windsor ON, Tijuana MX, Fort Erie ON).
+        Geospatial sovereign US validation using authoritative sovereign boundary polygons (Natural Earth 1:10m):
+        1. If country_code from geocoder is known and foreign (e.g. CAN, MEX), reject.
+        2. If boundary data is missing/corrupted, fail closed with GeocodingError.
+        3. Reject if point falls within Canadian or Mexican sovereign boundary (CAN_POLYGON, MEX_POLYGON).
+        4. Accept if point is covered by US sovereign boundary (US_POLYGON covers), which includes Continental US,
+           Alaska, and Hawaii polygons.
+        5. Coastal boundary tolerance: allows points immediately on the maritime coastline (within ~2 miles / 0.03 deg)
+           only if strictly closer to the US boundary than to Canada or Mexico.
         """
-        if country_code:
-            return country_code.upper() in ('USA', 'US', 'UNITED STATES')
+        if country_code and country_code.upper() not in ('USA', 'US', 'UNITED STATES'):
+            return False
 
-        # Alaska bounding envelope
-        if 51.0 <= lat <= 71.5 and -180.0 <= lon <= -129.0:
+        if US_POLYGON is None:
+            raise GeocodingError(
+                "Authoritative US boundary polygon data is not loaded. Cannot safely validate coordinates."
+            )
+
+        pt = Point(lon, lat)
+
+        # 1. Definite foreign sovereign rejection
+        if CAN_POLYGON is not None and CAN_POLYGON.covers(pt):
+            return False
+        if MEX_POLYGON is not None and MEX_POLYGON.covers(pt):
+            return False
+
+        # 2. Definite domestic sovereign acceptance (CONUS, Alaska, Hawaii)
+        if US_POLYGON.covers(pt):
             return True
 
-        # Hawaii bounding envelope
-        if 18.5 <= lat <= 22.5 and -160.5 <= lon <= -154.5:
+        # 3. Coastal maritime edge tolerance: within ~2 miles of coastline and closer to US than foreign land
+        d_us = US_POLYGON.distance(pt)
+        d_can = CAN_POLYGON.distance(pt) if CAN_POLYGON is not None else float('inf')
+        d_mex = MEX_POLYGON.distance(pt) if MEX_POLYGON is not None else float('inf')
+
+        if d_us < 0.03 and d_us < d_can and d_us < d_mex:
             return True
 
-        # Check explicit Canadian border points along Great Lakes / Detroit River / St Lawrence
-        # Windsor ON is south of Detroit MI across the Detroit river:
-        if -83.040 <= lon <= -82.90 and 42.20 <= lat <= 42.325:
-            return False
-
-        # Fort Erie, Canada (across from Buffalo NY):
-        if -79.05 <= lon <= -78.90 and 42.88 <= lat <= 42.96:
-            return False
-
-        # Tijuana, Mexico (south of San Diego border ~32.534N):
-        if -117.2 <= lon <= -116.8 and lat < 32.534:
-            return False
-
-        # General Mexico border
-        if lat < 25.837:
-            return False
-
-        # 49th parallel northern boundary
-        if lat > 49.0:
-            if not (49.0 < lat <= 49.384358 and -95.3 <= lon <= -94.8):
-                return False
-
-        # Check against loaded GeoJSON polygons (USA, CAN, MEX)
-        if US_POLYGON is not None:
-            pt = Point(lon, lat)
-            # 1. Definite foreign rejection if inside Canadian or Mexican sovereign boundary
-            if CAN_POLYGON is not None and CAN_POLYGON.contains(pt):
-                return False
-            if MEX_POLYGON is not None and MEX_POLYGON.contains(pt):
-                return False
-
-            # 2. Definite acceptance if inside US boundary
-            if US_POLYGON.contains(pt):
-                return True
-
-            # 3. For coastal / border points slightly offset from simplified polygon:
-            d_us = US_POLYGON.distance(pt)
-            d_can = CAN_POLYGON.distance(pt) if CAN_POLYGON is not None else float('inf')
-            d_mex = MEX_POLYGON.distance(pt) if MEX_POLYGON is not None else float('inf')
-
-            # Point must be very close to US boundary and closer to US than to any neighboring country
-            if d_us < 0.05 and d_us < d_can and d_us < d_mex:
-                return True
-            return False
-
-        # Fallback only if polygon could not be loaded
-        return (24.396308 <= lat <= 49.384358 and -125.0 <= lon <= -66.93457)
+        return False

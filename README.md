@@ -1,45 +1,102 @@
 # Production Fuel Route Optimization API
 
-A mathematically justified Django & Django REST Framework application that plans cost-effective fuel stops for long-distance driving across the United States.
+A mathematically grounded, production-hardened Django REST Framework service that plans cost-effective fuel stops for long-distance highway trips across the United States.
 
 ---
 
-## 1. Core Architecture & Refinements
+## 1. Quickstart & Clean-Checkout Guide
 
-### Exact Dynamic Programming Cost-Minimization Algorithm
+### Prerequisites
+- Python 3.12, 3.13, or 3.14
+- System PROJ libraries (for spatial coordinate projections):
+  - Ubuntu/Debian: `sudo apt-get install -y libproj-dev proj-bin proj-data`
+  - macOS: `brew install proj`
+  - Windows: provided automatically by `pyproj` binary wheels
+
+### Step-by-Step Local Setup
+
+1. **Clone and create a virtual environment**:
+   ```bash
+   git clone https://github.com/MJenius/Spotter-Backend-Task.git
+   cd Spotter-Backend-Task
+   python -m venv venv
+   # On Windows:
+   .\venv\Scripts\activate
+   # On Linux / macOS:
+   source venv/bin/activate
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+
+3. **Configure environment variables**:
+   ```bash
+   cp .env.example .env
+   ```
+   Edit `.env` to provide a real local secret and your HeiGIT OpenRouteService API key:
+   ```env
+   SECRET_KEY=django-insecure-your-local-dev-secret-key
+   DEBUG=True
+   ALLOWED_HOSTS=127.0.0.1,localhost
+   HEIGIT_API_KEY=your_heigit_openrouteservice_api_key_here
+   ```
+
+4. **Run migrations and import fuel station data**:
+   ```bash
+   python manage.py migrate
+   python manage.py import_fuel_stations
+   ```
+
+5. **Run tests offline**:
+   ```bash
+   pytest -v
+   ```
+
+6. **Start the development server**:
+   ```bash
+   python manage.py runserver 0.0.0.0:8000
+   ```
+   Open your browser to [http://127.0.0.1:8000/](http://127.0.0.1:8000/) for the interactive Leaflet map interface.
+
+---
+
+## 2. Core Architecture & Mathematical Guarantees
+
+### Exact Dynamic Programming Fuel Optimizer
 - Implemented in `fuel_planner/services/optimizer.py`.
-- Formulated as an exact Dynamic Programming (DP) state-transition solver over the continuous vehicle refueling problem with finite tank capacity:
+- Formulated as an exact Dynamic Programming (DP) state-transition solver over the continuous vehicle refueling problem with finite tank capacity ($C = 50.0$ gal, $mpg = 10.0$):
   - **Critical-State Reduction**: Because fuel cost is piecewise linear and non-decreasing along each edge, any globally optimal plan refuels to reach an intermediate station with tank empty ($f = 0$) or refuels completely to tank capacity ($f = C$). The continuous state space reduces without loss of optimality to discrete critical arrival/departure states at each station candidate.
-  - **Backward DP Transitions**: Evaluates exact minimum total cost to reach the destination from each candidate station under both critical fuel arrival levels, incorporating station off-route access detour distances charged at station rate.
+  - **Access Distance Model**: Station off-route access distances are explicitly computed via spatial projection (`access_miles_one_way`) and added to segment driving distances:
+    $$D(u, v) = (p_v - p_u) + a_u + a_v$$
+    Access travel is charged at the station rate, preventing distant off-route stations from being chosen over closer alternatives.
   - **Arithmetic Grounding**: State transitions, fuel consumption, and purchase amounts use exact rational arithmetic (`fractions.Fraction`) internally, converted to `Decimal` for financial outputs.
-  - **Empirical Proof**: Verified by an independent test suite (`test_optimizer_bruteforce.py`) that executes **250 randomized network scenarios** comparing DP outputs against an independent exhaustive brute-force search over all combinatorially feasible stop sequences and purchase fractions, proving 100% agreement.
-- Guarantees strict invariants:
-  - Fuel in tank strictly satisfies $0 \le \text{fuel} \le 50.0$ gallons at all times.
-  - Fuel stops are visited strictly in route order.
-  - Internal purchase quantities and costs are calculated with unrounded Decimals, ensuring the sum of purchase costs equals the total reported cost.
+  - **Mathematical Proof**: Verified by an independent test suite (`test_optimizer_bruteforce.py`) that executes **250 randomized network scenarios** comparing DP outputs against an independent exhaustive brute-force search over all combinatorially feasible stop sequences and purchase fractions, proving 100% agreement.
 
-### Exact vs Approximate Station Eligibility Policy
-- **Primary Data Reality**: The provided `fuel-prices-for-be-assessment.csv` dataset contains highway exit descriptions rather than numbered street addresses (e.g., `I-44, EXIT 283 & US-69`). 7,516 records are enriched with city-level centroid coordinates from the US Census dataset.
-- **Strict Default Everywhere**: `allow_approximate_stations` defaults strictly to `False` across the request serializer (`RoutePlanRequestSerializer`), route planner (`RoutePlanningService`), API view controller (`RoutePlanAPIView`), and the Leaflet interactive map.
+### Strict Coordinate Provenance Policy
+- **Primary Data Reality**: The provided `fuel-prices-for-be-assessment.csv` dataset contains highway exit descriptions rather than numbered street addresses (e.g., `I-44, EXIT 283 & US-69`). 7,516 records are enriched with city-level centroid coordinates from the US Census dataset and categorized as `APPROXIMATE`.
+- **Strict Default Everywhere**: `allow_approximate_stations` defaults strictly to `False` across serializers, views, services, and the frontend demo.
 - If a route exceeds vehicle range and no verified `EXACT` coordinates exist, the API returns a transparent HTTP 422 error detailing that the dataset primarily contains approximate city centroids.
 - Opting into approximate stations via `"allow_approximate_stations": true` is explicitly documented for demonstration purposes, with a clear note that individual stations are placed at city centroids.
 
-### Route Refinement & Leg Verification
-- When fuel stops are selected, the planner calls the HeiGIT routing provider (`openrouteservice/v2/directions/driving-car/geojson`) with waypoints.
+### Route Refinement & Invariant Reconciliation
+- When provisional fuel stops are selected, the planner calls the HeiGIT routing provider (`openrouteservice/v2/directions/driving-car/geojson`) with waypoints.
 - `instructions: True` is enabled so the provider returns exact driving leg distances (`segments`).
-- **Strict Verification**: If the provider returns a leg count that does not match the expected number of stops plus one, the planner raises an immediate error. It **never** returns a refined route paired with fuel purchases calculated against a different route.
-- Recomputed fuel purchases are validated against the actual refined leg distances.
+- **Strict Reconciliation**:
+  - If the provider returns a leg count that does not match the expected number of stops plus one, the planner raises an immediate error.
+  - If recomputing fuel purchases on actual road leg distances drops or changes any provisional stop, the application rejects the itinerary with an explicit error rather than displaying mismatched route geometry.
 
-### Defensible Geospatial Validation with US GeoJSON Boundary
-- Implemented in `fuel_planner/services/geocoding.py` using `data/us_boundary.geojson`.
-- Directly checks coordinates against the official US multi-polygon boundary using Shapely spatial operations.
-- Validates US coordinates against the 49th parallel northern boundary (rejecting Canadian territory like Vancouver, Toronto, and Windsor while accommodating the Minnesota Northwest Angle up to 49.38°N).
-- Rejects Mexican border territory south of the official border (e.g. Tijuana at 32.51°N vs San Diego at 32.71°N).
-- Supports valid continental US, Alaska (51.0°–71.5°N, -180.0°–-129.0°W), and Hawaii (18.5°–22.5°N, -160.5°–-154.5°W).
+### Defensible Geospatial Validation
+- Implemented in `fuel_planner/services/geocoding.py` using `data/us_boundary.geojson` (Natural Earth 1:10m sovereign boundary polygons for USA, Canada, and Mexico).
+- Authoritative polygon covers checks validate valid continental US, Alaska, and Hawaii locations without relying on coarse bounding boxes.
+- Strictly rejects Canadian territory (Windsor ON across from Detroit MI, Fort Erie ON across from Buffalo NY, Vancouver, Toronto) and Mexican territory (Tijuana across from San Diego).
+- Fails closed if boundary dataset is unavailable.
 
 ---
 
-## 2. API Usage
+## 3. API Usage
 
 ### Endpoint: `POST /api/v1/route-plan/`
 
@@ -54,7 +111,7 @@ A mathematically justified Django & Django REST Framework application that plans
 }
 ```
 
-#### Request (With Approximate Stations for Demonstration)
+#### Request (Demonstration Mode with Approximate Stations)
 ```json
 {
   "start": "Los Angeles, CA",
@@ -95,22 +152,22 @@ A mathematically justified Django & Django REST Framework application that plans
 
 ---
 
-## 3. Automated Test Suite
+## 4. Automated Test Suite
 
 Run tests completely offline:
 ```bash
-pytest
+pytest -v
 ```
 
 **Results:**
 - **265 passing unit, integration, and brute-force tests** covering:
   - 250 randomized network scenarios mathematically verifying that the exact DP optimizer matches independent combinatorial brute-force solutions to the penny.
   - Strict invariants: vehicle fuel levels within $[0, 50]$ gallons at all points, stops strictly visited in route order.
-  - Exact access distance charging (both off-route access and return distance).
+  - Access distance charging and off-route detour evaluation.
   - Unrounded Decimal fuel purchase summation and invariant checks.
-  - Refined route leg distance recomputation.
+  - Refined route leg distance recomputation and sequence reconciliation.
   - Rejection of malformed or mismatching refined legs.
   - Strict default exclusion of approximate stations in serializers, views, and planner services.
   - Production `SECRET_KEY` validation preventing insecure defaults when `DEBUG=False`.
-  - Geospatial validation using official US boundary GeoJSON with high-resolution sovereign boundary checks (USA, Canada, and Mexico) correctly discriminating close border pairs (Detroit vs Windsor, Buffalo vs Fort Erie, San Diego vs Tijuana, Alaska, Hawaii, and overseas).
-  - Call budget limit enforcement ($\le 2$ external calls).
+  - Geospatial validation using official US boundary GeoJSON with high-resolution sovereign boundary checks (USA, Canada, and Mexico) correctly discriminating close border pairs (Detroit vs Windsor, Buffalo vs Fort Erie, San Diego vs Tijuana, Alaska, Hawaii, and ocean coordinates).
+  - Call budget limit enforcement ($\le 2$ directions-routing calls).

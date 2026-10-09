@@ -25,7 +25,7 @@
       }
     },
     {
-      "name": "2. Medium Journey (>500 mi, Refueling Required) - LA to Salt Lake City",
+      "name": "2. Medium Journey (>500 mi, Demo Mode with Approximate Stations) - LA to Salt Lake City",
       "request": {
         "method": "POST",
         "header": [
@@ -33,7 +33,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"start\": \"Los Angeles, CA\",\n  \"finish\": \"Salt Lake City, UT\",\n  \"starting_fuel_gallons\": 50.0\n}"
+          "raw": "{\n  \"start\": \"Los Angeles, CA\",\n  \"finish\": \"Salt Lake City, UT\",\n  \"starting_fuel_gallons\": 50.0,\n  \"allow_approximate_stations\": true\n}"
         },
         "url": {
           "raw": "{{base_url}}/api/v1/route-plan/",
@@ -43,7 +43,7 @@
       }
     },
     {
-      "name": "3. Long Multi-Stop Journey (>1000 mi) - New York to Miami",
+      "name": "3. Long Multi-Stop Journey (>1000 mi, Demo Mode with Approximate Stations) - New York to Miami",
       "request": {
         "method": "POST",
         "header": [
@@ -51,7 +51,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"start\": \"New York, NY\",\n  \"finish\": \"Miami, FL\",\n  \"starting_fuel_gallons\": 50.0\n}"
+          "raw": "{\n  \"start\": \"New York, NY\",\n  \"finish\": \"Miami, FL\",\n  \"starting_fuel_gallons\": 50.0,\n  \"allow_approximate_stations\": true\n}"
         },
         "url": {
           "raw": "{{base_url}}/api/v1/route-plan/",
