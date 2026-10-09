@@ -13,12 +13,18 @@ if env_path.exists():
                 k, v = line.split('=', 1)
                 os.environ.setdefault(k.strip(), v.strip())
 
-# Strict production security defaults: no unsafe fallbacks
-SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-dev-key-spotter-fuel-planner-change-in-prod')
+from django.core.exceptions import ImproperlyConfigured
+
 DEBUG = os.environ.get('DEBUG', 'False').lower() in ('true', '1', 'yes')
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-dev-key-spotter-fuel-planner-change-in-prod' if DEBUG else '')
+
+if not DEBUG and (not SECRET_KEY or 'django-insecure' in SECRET_KEY):
+    raise ImproperlyConfigured("Production settings error: A secure SECRET_KEY environment variable is mandatory when DEBUG=False.")
 
 raw_allowed_hosts = os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost')
 ALLOWED_HOSTS = [h.strip() for h in raw_allowed_hosts.split(',') if h.strip()]
+if 'testserver' not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append('testserver')
 
 INSTALLED_APPS = [
     'django.contrib.admin',

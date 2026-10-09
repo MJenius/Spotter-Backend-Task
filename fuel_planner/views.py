@@ -51,7 +51,7 @@ class RoutePlanAPIView(APIView):
                 finish_input=data['finish'],
                 starting_fuel_gallons=data.get('starting_fuel_gallons'),
                 max_off_route_distance=data.get('max_off_route_distance_miles'),
-                allow_approximate_stations=data.get('allow_approximate_stations', True)
+                allow_approximate_stations=data.get('allow_approximate_stations', False)
             )
 
             if not result.get('success', False):

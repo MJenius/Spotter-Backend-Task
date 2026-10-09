@@ -10,18 +10,26 @@ from shapely.ops import unary_union
 
 logger = logging.getLogger(__name__)
 
-# Preload US Boundary geometry from GeoJSON
+# Preload US, Canada, and Mexico boundary geometries from GeoJSON
 BOUNDARY_FILE = Path(settings.BASE_DIR) / 'data' / 'us_boundary.geojson'
 US_POLYGON = None
+CAN_POLYGON = None
+MEX_POLYGON = None
 
 if BOUNDARY_FILE.exists():
     try:
         with open(BOUNDARY_FILE, 'r', encoding='utf-8') as f:
             b_data = json.load(f)
             if b_data.get('type') == 'FeatureCollection':
-                geoms = [shape(feat['geometry']) for feat in b_data.get('features', []) if 'geometry' in feat]
-                if geoms:
-                    US_POLYGON = unary_union(geoms)
+                for feat in b_data.get('features', []):
+                    iso = (feat.get('properties', {}) or {}).get('ADM0_A3')
+                    geom = shape(feat['geometry'])
+                    if iso == 'USA':
+                        US_POLYGON = geom
+                    elif iso == 'CAN':
+                        CAN_POLYGON = geom
+                    elif iso == 'MEX':
+                        MEX_POLYGON = geom
             elif 'geometry' in b_data:
                 US_POLYGON = shape(b_data['geometry'])
     except Exception as e:
@@ -140,11 +148,28 @@ class GeocodingService:
             if not (49.0 < lat <= 49.384358 and -95.3 <= lon <= -94.8):
                 return False
 
-        # Check against loaded US GeoJSON polygon
+        # Check against loaded GeoJSON polygons (USA, CAN, MEX)
         if US_POLYGON is not None:
             pt = Point(lon, lat)
-            # True if point is inside US polygon or directly on the coastal boundary
-            return US_POLYGON.contains(pt) or US_POLYGON.distance(pt) < 0.005
+            # 1. Definite foreign rejection if inside Canadian or Mexican sovereign boundary
+            if CAN_POLYGON is not None and CAN_POLYGON.contains(pt):
+                return False
+            if MEX_POLYGON is not None and MEX_POLYGON.contains(pt):
+                return False
+
+            # 2. Definite acceptance if inside US boundary
+            if US_POLYGON.contains(pt):
+                return True
+
+            # 3. For coastal / border points slightly offset from simplified polygon:
+            d_us = US_POLYGON.distance(pt)
+            d_can = CAN_POLYGON.distance(pt) if CAN_POLYGON is not None else float('inf')
+            d_mex = MEX_POLYGON.distance(pt) if MEX_POLYGON is not None else float('inf')
+
+            # Point must be very close to US boundary and closer to US than to any neighboring country
+            if d_us < 0.05 and d_us < d_can and d_us < d_mex:
+                return True
+            return False
 
         # Fallback only if polygon could not be loaded
         return (24.396308 <= lat <= 49.384358 and -125.0 <= lon <= -66.93457)
