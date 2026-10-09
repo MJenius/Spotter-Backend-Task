@@ -16,12 +16,13 @@ A mathematically justified Django & Django REST Framework application that plans
   - Fuel in tank strictly satisfies $0 \le \text{fuel} \le 50.0$ gallons at all times.
   - Fuel stops are visited strictly in route order.
   - Internal purchase quantities and costs are calculated with unrounded Decimals, ensuring the sum of purchase costs equals the total reported cost.
+  - Covered by exhaustive comparisons against alternative feasible plans on small networks.
 
 ### Exact vs Approximate Station Eligibility Policy
 - **Primary Data Reality**: The provided `fuel-prices-for-be-assessment.csv` dataset contains highway exit descriptions rather than numbered street addresses (e.g., `I-44, EXIT 283 & US-69`). 7,516 records are enriched with city-level centroid coordinates from the US Census dataset.
 - **Strict Default**: `allow_approximate_stations` defaults to `False` in the request serializer (`RoutePlanRequestSerializer`), route planner (`RoutePlanningService`), and the Leaflet interactive map.
-- If a route exceeds vehicle range and no verified `EXACT` coordinates exist, the API returns a transparent HTTP 422 error detailing that the dataset primarily contains approximate city-level centroids.
-- Clients can explicitly set `"allow_approximate_stations": true` to run demonstration multi-stop routes using the dataset's city-level approximations.
+- If a route exceeds vehicle range and no verified `EXACT` coordinates exist, the API returns a transparent HTTP 422 error detailing that the dataset primarily contains approximate city centroids.
+- Opting into approximate stations via `"allow_approximate_stations": true` is explicitly documented for demonstration purposes, with a clear note that individual stations are placed at city centroids.
 
 ### Route Refinement & Leg Verification
 - When fuel stops are selected, the planner calls the HeiGIT routing provider (`openrouteservice/v2/directions/driving-car/geojson`) with waypoints.
@@ -29,9 +30,10 @@ A mathematically justified Django & Django REST Framework application that plans
 - **Strict Verification**: If the provider returns a leg count that does not match the expected number of stops plus one, the planner raises an immediate error. It **never** returns a refined route paired with fuel purchases calculated against a different route.
 - Recomputed fuel purchases are validated against the actual refined leg distances.
 
-### Defensible Geospatial Validation
-- Implemented in `fuel_planner/services/geocoding.py`.
-- Validates US coordinates against the 49th parallel northern boundary (rejecting Canadian territory like Vancouver, Toronto, and Windsor while allowing the Minnesota Northwest Angle up to 49.38°N).
+### Defensible Geospatial Validation with US GeoJSON Boundary
+- Implemented in `fuel_planner/services/geocoding.py` using `data/us_boundary.geojson`.
+- Directly checks coordinates against the official US multi-polygon boundary using Shapely spatial operations.
+- Validates US coordinates against the 49th parallel northern boundary (rejecting Canadian territory like Vancouver, Toronto, and Windsor while accommodating the Minnesota Northwest Angle up to 49.38°N).
 - Rejects Mexican border territory south of the official border (e.g. Tijuana at 32.51°N vs San Diego at 32.71°N).
 - Supports valid continental US, Alaska (51.0°–71.5°N, -180.0°–-129.0°W), and Hawaii (18.5°–22.5°N, -160.5°–-154.5°W).
 
@@ -52,7 +54,7 @@ A mathematically justified Django & Django REST Framework application that plans
 }
 ```
 
-#### Request (With Approximate Stations for Demo)
+#### Request (With Approximate Stations for Demonstration)
 ```json
 {
   "start": "Los Angeles, CA",
@@ -108,5 +110,5 @@ pytest
   - Refined route leg distance recomputation.
   - Rejection of malformed or mismatching refined legs.
   - Strict default exclusion of approximate stations.
-  - Geospatial validation near international borders (Detroit vs Windsor, San Diego vs Tijuana, Alaska, Hawaii, and overseas).
+  - Geospatial validation using official US boundary polygon near international borders (Detroit vs Windsor, Buffalo vs Fort Erie, San Diego vs Tijuana, Alaska, Hawaii, and overseas).
   - Call budget limit enforcement ($\le 2$ external calls).

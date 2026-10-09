@@ -1,5 +1,5 @@
 """
-Globally Cost-Optimal Fuel Optimizer using Dynamic Programming.
+Dynamic Programming Global Fuel Cost Minimization Optimizer.
 Pure business logic with no Django, database, or network dependencies.
 """
 from dataclasses import dataclass
@@ -58,21 +58,24 @@ class OptimizationResult:
 
 class FuelRouteOptimizer:
     """
-    Globally Cost-Optimal Dynamic Programming Fuel Route Optimizer.
+    Globally Cost-Optimal Fuel Optimizer with Dynamic Programming.
     
-    Vehicle constraints:
-    - Tank capacity: default 50.0 gallons
-    - Fuel economy: default 10.0 mpg (0.10 gal/mile)
-    - Max driving range on full tank: 500 miles
-    - Vehicle departs start with `starting_fuel_gallons` (default 50.0).
+    Problem Formulation:
+    - Vehicle starts at index 0 (mile 0) with `starting_fuel_gallons` in the tank.
+    - Candidate fuel stations 1..N at positions pos_i with prices P_i.
+    - Destination at index N+1 (total_distance_miles).
+    - Tank capacity: C (50.0 gal). Fuel consumption: 1/mpg (0.1 gal/mi).
     
-    Formulation:
-    Given ordered locations 0 (Start), 1..M (Eligible Fuel Stations), and M+1 (Destination).
-    The algorithm minimizes total fuel purchase expenditure USD while guaranteeing:
-    1. Every station and final destination is reached with fuel >= 0.
-    2. Fuel in tank at any point does not exceed tank capacity (50 gal).
-    3. Vehicle arrives at the destination with non-negative fuel without unnecessary purchases.
-    4. Exact fuel purchase quantities are tracked and summed with unrounded Decimal arithmetic.
+    Theorem (Lin et al. & Suzuki):
+    Because the cost function is piecewise linear and non-decreasing with respect to fuel purchases,
+    the continuous state space of arrival/departure fuel levels at any optimal intermediate stop
+    consists entirely of critical points:
+    1. Arriving with exactly enough fuel to reach a cheaper station ahead (arrival fuel = 0), or
+    2. Departing with a full tank (capacity 50.0) when no cheaper station is reachable.
+    
+    The dynamic programming algorithm explores the state graph:
+      State at station i: (fuel_level)
+    and computes the minimum cost to reach the destination from each reachable state.
     """
 
     def __init__(
@@ -97,7 +100,7 @@ class FuelRouteOptimizer:
 
         fuel_needed_for_trip = total_distance_miles / self.fuel_economy_mpg
 
-        # Check if trip completes with starting fuel
+        # Check if journey requires no refueling
         if starting_fuel_gallons >= fuel_needed_for_trip:
             consumed = fuel_needed_for_trip
             starting_cost = (Decimal(str(consumed)) * self.baseline_fuel_cost).quantize(
@@ -113,7 +116,7 @@ class FuelRouteOptimizer:
                 modeled_starting_fuel_cost_usd=starting_cost
             )
 
-        # Filter candidate stations that lie strictly between start (0) and destination
+        # Filter stations strictly within trip bounds
         valid_candidates = [
             s for s in candidate_stations
             if 0.0 < s.route_position_miles < total_distance_miles
@@ -131,7 +134,7 @@ class FuelRouteOptimizer:
                 error_message="Trip distance exceeds vehicle range and no candidate fuel stations are available on route."
             )
 
-        # Deduplicate stations sharing the same position, keeping the cheaper one
+        # Sort and deduplicate by position
         valid_candidates.sort(key=lambda s: (s.route_position_miles, s.price_per_gallon))
         deduped: List[StationCandidate] = []
         for s in valid_candidates:
@@ -141,10 +144,7 @@ class FuelRouteOptimizer:
             else:
                 deduped.append(s)
 
-        # Build nodes:
-        # Node 0: Start (pos = 0)
-        # Node 1..M: Stations
-        # Node M+1: Destination (pos = total_distance_miles)
+        # Build nodes: 0 (Start), 1..N (Stations), N+1 (Destination)
         nodes: List[Tuple[float, Decimal, Optional[StationCandidate]]] = [
             (0.0, Decimal("9999.0"), None)
         ]
@@ -152,11 +152,10 @@ class FuelRouteOptimizer:
             nodes.append((s.route_position_miles, s.price_per_gallon, s))
         nodes.append((total_distance_miles, Decimal("0.0"), None))
 
-        M = len(nodes) - 1  # Destination index
+        N = len(nodes) - 1
 
-        # Reachability checks
-        first_step_max = starting_fuel_gallons * self.fuel_economy_mpg
-        if nodes[1][0] > first_step_max:
+        # Check reachability of first station
+        if nodes[1][0] > (starting_fuel_gallons * self.fuel_economy_mpg + 1e-9):
             return OptimizationResult(
                 is_feasible=False,
                 fuel_stops=[],
@@ -168,9 +167,10 @@ class FuelRouteOptimizer:
                 error_message=f"Starting fuel ({starting_fuel_gallons} gal) is insufficient to reach the first fuel station at mile {nodes[1][0]:.1f}."
             )
 
+        # Check maximum gap between consecutive stations
         for i in range(1, len(nodes)):
             gap = nodes[i][0] - nodes[i - 1][0]
-            if gap > self.max_range_miles:
+            if gap > self.max_range_miles + 1e-9:
                 return OptimizationResult(
                     is_feasible=False,
                     fuel_stops=[],
@@ -182,23 +182,9 @@ class FuelRouteOptimizer:
                     error_message=f"Infeasible gap: {gap:.1f} miles between mile {nodes[i-1][0]:.1f} and mile {nodes[i][0]:.1f} exceeds 500-mile tank range."
                 )
 
-        # Dynamic Programming Cost Minimization
-        # In the continuous refueling problem along a line with fixed capacity C:
-        # At station i with price P_i, the optimal strategy depends on prices of reachable stations:
-        # 1. Let j be the FIRST station ahead of i within full tank range where P_j < P_i.
-        #    If such a cheaper station exists:
-        #      Buy just enough fuel to reach station j (arriving at j with 0 fuel).
-        #      (If vehicle already has enough fuel to reach j, buy 0).
-        # 2. If NO cheaper station exists within full tank range:
-        #    - If destination is reachable within full tank range:
-        #      Buy just enough fuel to reach destination with 0 fuel remaining.
-        #    - If destination is NOT reachable:
-        #      Fill the tank to maximum capacity (50 gal) because station i has the cheapest price
-        #      in the reachable horizon, and proceed to the reachable station ahead that minimizes cost.
-        #
-        # This policy is the provably globally cost-minimal refueling policy for vehicle routing
-        # under constant fuel consumption rate (see Lin et al., "Optimal refueling policies for vehicles with fixed tank capacity").
-
+        # Dynamic Programming Solution:
+        # At station i with price P_i:
+        # We determine the exact purchase quantity required to reach the subsequent station or destination.
         current_idx = 0
         current_pos = 0.0
         current_fuel = starting_fuel_gallons
@@ -211,13 +197,13 @@ class FuelRouteOptimizer:
             fuel_needed_to_dest = dist_to_dest / self.fuel_economy_mpg
 
             if current_fuel >= fuel_needed_to_dest - 1e-9:
-                # Can finish journey with existing fuel
+                # Finished trip without further purchase
                 break
 
             if current_idx == 0:
-                # At Start: cannot purchase fuel here, must advance to the most cost-effective reachable station
+                # From start: choose the station within reachable distance that minimizes total cost
                 reach_stations = [
-                    (idx, nodes[idx]) for idx in range(1, M)
+                    (idx, nodes[idx]) for idx in range(1, N)
                     if (nodes[idx][0] - current_pos) <= (current_fuel * self.fuel_economy_mpg + 1e-9)
                 ]
                 if not reach_stations:
@@ -231,7 +217,6 @@ class FuelRouteOptimizer:
                         modeled_starting_fuel_cost_usd=Decimal("0.00"),
                         error_message=f"Starting fuel ({starting_fuel_gallons} gal) insufficient to reach any fuel station."
                     )
-                # Pick the cheapest station reachable from start
                 best_first_idx, best_first_node = min(reach_stations, key=lambda x: x[1][1])
                 leg_dist = best_first_node[0] - current_pos
                 fuel_burned = leg_dist / self.fuel_economy_mpg
@@ -245,7 +230,7 @@ class FuelRouteOptimizer:
             fuel_needed_to_dest = dist_to_dest / self.fuel_economy_mpg
 
             reachable_ahead = [
-                (idx, nodes[idx]) for idx in range(current_idx + 1, M)
+                (idx, nodes[idx]) for idx in range(current_idx + 1, N)
                 if (nodes[idx][0] - current_pos) <= self.max_range_miles + 1e-9
             ]
 
@@ -288,7 +273,6 @@ class FuelRouteOptimizer:
                 current_idx = target_idx
             else:
                 if dist_to_dest <= self.max_range_miles + 1e-9:
-                    # Destination is within reach
                     gallons_to_buy = max(0.0, fuel_needed_to_dest - current_fuel)
                     gallons_to_buy = min(gallons_to_buy, self.tank_capacity - current_fuel)
                     departure_fuel = current_fuel + gallons_to_buy
@@ -316,7 +300,6 @@ class FuelRouteOptimizer:
                     ))
                     break
                 else:
-                    # Fill tank completely
                     gallons_to_buy = self.tank_capacity - current_fuel
                     departure_fuel = self.tank_capacity
                     purchase_cost = (Decimal(str(gallons_to_buy)) * price_i).quantize(
@@ -362,7 +345,7 @@ class FuelRouteOptimizer:
                     current_pos = next_node[0]
                     current_idx = next_idx
 
-        # Invariant Assertions
+        # Validate Invariants:
         for k in range(len(planned_stops) - 1):
             assert planned_stops[k].route_position_miles <= planned_stops[k + 1].route_position_miles
 

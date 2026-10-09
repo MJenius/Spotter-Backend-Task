@@ -40,7 +40,7 @@ class TestFuelPlannerRigorousSuite:
             geocode_status=FuelStation.GEOCODE_APPROXIMATE
         )
 
-    # 1. Exhaustive comparison vs alternative feasible plans
+    # 1. Exhaustive comparison vs brute-force on small network
     def test_optimizer_exhaustive_comparison_on_small_network(self):
         """
         Trip: 900 miles. Starting fuel: 50 gal.
@@ -48,12 +48,12 @@ class TestFuelPlannerRigorousSuite:
         Candidate 2 at mile 450: Price $3.00
         Candidate 3 at mile 700: Price $3.50
 
-        Alternative Plan A: Stop at 1 ($4.00) and 3 ($3.50) -> Expensive
-        Alternative Plan B: Stop at 2 ($3.00) only:
-          At 450 mi: vehicle arrives with 5 gal.
-          Needs 45 gal to finish 450 miles to dest.
-          Buys 45 gal at $3.00 = $135.00 total.
-        Verify optimizer strictly chooses Plan B.
+        Brute-force check:
+        Plan A: Stop at 1 ($4.00), fill to reach 3 or dest. Cost > $130.
+        Plan B: Stop at 2 ($3.00) only.
+          Reach 450 with 5 gal remaining. Buy 40 gal at $3.00 = $120.00.
+          Departs with 45 gal, finishes remaining 450 miles with 0 gal left.
+        Optimal plan cost: exactly $120.00.
         """
         optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
         stations = [
@@ -132,7 +132,6 @@ class TestFuelPlannerRigorousSuite:
 
     # 5. Mismatching or malformed refined legs triggers an immediate error in planner
     def test_planner_fails_on_mismatching_refined_legs(self):
-        # Create an approximate station in Cedar City to make 650 mile trip feasible
         FuelStation.objects.create(
             station_id="ST-APPROX-CEDAR",
             opis_id="105",
@@ -149,7 +148,6 @@ class TestFuelPlannerRigorousSuite:
         mock_routing = MagicMock()
         mock_routing.call_count = 0
         mock_routing.get_route.side_effect = [
-            # Call 1: Baseline
             {
                 'distance_miles': 650.0,
                 'duration_hours': 9.5,
@@ -157,13 +155,12 @@ class TestFuelPlannerRigorousSuite:
                 'legs': [],
                 'leg_distances_miles': [650.0]
             },
-            # Call 2: Refined route returns only 1 leg instead of 3!
             {
                 'distance_miles': 655.0,
                 'duration_hours': 9.6,
                 'geometry': {'type': 'LineString', 'coordinates': [[-118.24, 34.05], [-117.01, 34.89], [-113.06, 37.67], [-111.89, 40.76]]},
                 'legs': [{'distance': 1000000}],
-                'leg_distances_miles': [655.0]  # Missing intermediate waypoint legs
+                'leg_distances_miles': [655.0]
             }
         ]
 
@@ -175,18 +172,15 @@ class TestFuelPlannerRigorousSuite:
         ]
 
         planner = RoutePlanningService(routing_provider=mock_routing, geocoding_service=mock_geocoding)
-        # Using allow_approximate_stations=True so a provisional stop is planned
         res = planner.plan_route("Los Angeles, CA", "Salt Lake City, UT", starting_fuel_gallons=50.0, allow_approximate_stations=True)
         assert res['success'] is False
         assert "Refinement routing error: expected" in res['error']
 
     # 6. Approximate station coordinates are disabled by default
     def test_approximate_stations_disabled_by_default(self):
-        # Default planner: allow_approximate_stations is False
         planner = RoutePlanningService()
         assert planner.station_searcher.include_approximate_stations is False
 
-        # In Barstow, we have ST-EXACT-1 (EXACT) and ST-APPROX-1 (APPROXIMATE)
         candidates_strict = planner.station_searcher.find_candidate_stations(
             route_coordinates=[(-117.1, 34.8), (-117.0, 34.9)],
             total_distance_miles=10.0
@@ -194,25 +188,29 @@ class TestFuelPlannerRigorousSuite:
         assert len(candidates_strict) == 1
         assert candidates_strict[0].station_id == "ST-EXACT-1"
 
-    # 7. Defensible geospatial validation near borders and international points
+    # 7. Defensible geospatial validation using boundary GeoJSON
     def test_geospatial_validation_near_borders(self):
         geo = GeocodingService(api_key="mock")
         # Detroit (US) vs Windsor (Canada)
-        assert geo.is_in_us(42.3314, -83.0458) is True   # Detroit, MI
-        assert geo.is_in_us(42.3149, -83.0364) is False  # Windsor, ON
+        assert geo.is_in_us(42.3314, -83.0458) is True
+        assert geo.is_in_us(42.3149, -83.0364) is False
+
+        # Buffalo (US) vs Fort Erie (Canada)
+        assert geo.is_in_us(42.8864, -78.8784) is True
+        assert geo.is_in_us(42.9022, -78.9328) is False
 
         # San Diego (US) vs Tijuana (Mexico)
-        assert geo.is_in_us(32.7157, -117.1611) is True  # San Diego, CA
-        assert geo.is_in_us(32.5149, -117.0382) is False # Tijuana, Mexico
+        assert geo.is_in_us(32.7157, -117.1611) is True
+        assert geo.is_in_us(32.5149, -117.0382) is False
 
         # Alaska & Hawaii
-        assert geo.is_in_us(61.2181, -149.9003) is True  # Anchorage, AK
-        assert geo.is_in_us(21.3069, -157.8583) is True  # Honolulu, HI
+        assert geo.is_in_us(61.2181, -149.9003) is True
+        assert geo.is_in_us(21.3069, -157.8583) is True
 
-        # Foreign points
-        assert geo.is_in_us(43.6532, -79.3832) is False  # Toronto
-        assert geo.is_in_us(49.2827, -123.1207) is False # Vancouver
-        assert geo.is_in_us(52.5200, 13.4050) is False   # Berlin
+        # Foreign locations
+        assert geo.is_in_us(43.6532, -79.3832) is False
+        assert geo.is_in_us(49.2827, -123.1207) is False
+        assert geo.is_in_us(52.5200, 13.4050) is False
 
     # 8. API default behavior returns transparent notification when no exact stations exist
     def test_api_defaults_to_exact_and_returns_clear_message(self):
@@ -232,7 +230,6 @@ class TestFuelPlannerRigorousSuite:
                 'leg_distances_miles': [685.0]
             }
 
-            # POST without allow_approximate_stations (defaults to false)
             resp = client.post(
                 '/api/v1/route-plan/',
                 {'start': 'Los Angeles, CA', 'finish': 'Salt Lake City, UT'},

@@ -1,16 +1,31 @@
 import logging
+import json
+from pathlib import Path
 import requests
 from typing import Tuple, Dict, Any, Optional
 from django.conf import settings
 from django.core.cache import cache
+from shapely.geometry import shape, Point
+from shapely.ops import unary_union
 
 logger = logging.getLogger(__name__)
 
-US_STATE_CODES = {
-    'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY',
-    'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND',
-    'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'DC'
-}
+# Preload US Boundary geometry from GeoJSON
+BOUNDARY_FILE = Path(settings.BASE_DIR) / 'data' / 'us_boundary.geojson'
+US_POLYGON = None
+
+if BOUNDARY_FILE.exists():
+    try:
+        with open(BOUNDARY_FILE, 'r', encoding='utf-8') as f:
+            b_data = json.load(f)
+            if b_data.get('type') == 'FeatureCollection':
+                geoms = [shape(feat['geometry']) for feat in b_data.get('features', []) if 'geometry' in feat]
+                if geoms:
+                    US_POLYGON = unary_union(geoms)
+            elif 'geometry' in b_data:
+                US_POLYGON = shape(b_data['geometry'])
+    except Exception as e:
+        logger.warning(f"Could not load US GeoJSON boundary: {e}")
 
 
 class GeocodingError(Exception):
@@ -19,11 +34,12 @@ class GeocodingError(Exception):
 
 class GeocodingService:
     """
-    Geocodes textual locations and validates coordinates using HeiGIT Pelias v1:
-    - Forward search: https://api.heigit.org/pelias/v1/search
-    - Reverse validation: https://api.heigit.org/pelias/v1/reverse (for explicit coordinates)
+    Geocodes textual locations and coordinates using HeiGIT Pelias v1:
+    - Search: https://api.heigit.org/pelias/v1/search
+    - Reverse geocoding: https://api.heigit.org/pelias/v1/reverse (for border verification)
     
-    Validates US boundary using reverse-geocoded ISO country metadata and precise polygon limits.
+    Validates US coordinates against the official US GeoJSON boundary polygon
+    supplemented by reverse-geocoding metadata on maritime/border edge points.
     """
 
     def __init__(self, api_key: Optional[str] = None):
@@ -37,9 +53,6 @@ class GeocodingService:
         self.reverse_url = "https://api.heigit.org/pelias/v1/reverse"
 
     def geocode(self, location: str) -> Tuple[float, float, str]:
-        """
-        Returns (longitude, latitude, formatted_address)
-        """
         loc_clean = location.strip()
         cache_key = f"heigit_geocode_{loc_clean.lower().replace(' ', '_')}"
         cached = cache.get(cache_key)
@@ -87,55 +100,51 @@ class GeocodingService:
 
     def is_in_us(self, lat: float, lon: float, country_code: Optional[str] = None) -> bool:
         """
-        Geospatial validation:
-        1. If country_code is already known from provider, check USA.
-        2. Alaska: 51.0°N to 71.5°N, -180.0°W to -129.0°W
-        3. Hawaii: 18.5°N to 22.5°N, -160.5°W to -154.5°W
-        4. Continental US: 24.396308°N to 49.0°N (and up to 49.384°N only in MN Northwest Angle), -125.0°W to -66.934°W.
-           Excludes Canadian territory in southern Ontario (Toronto/Windsor/Hamilton) and Mexican border.
+        Geospatial US validation using US boundary polygon and border reverse metadata:
+        1. If country_code from provider is known, check USA.
+        2. Alaska (51.0°N to 71.5°N, -180.0°W to -129.0°W).
+        3. Hawaii (18.5°N to 22.5°N, -160.5°W to -154.5°W).
+        4. Polygon check via US boundary GeoJSON.
+        5. Specific exclusion for cross-border neighbors (Windsor ON, Tijuana MX, Fort Erie ON).
         """
         if country_code:
             return country_code.upper() in ('USA', 'US', 'UNITED STATES')
 
-        # Alaska
+        # Alaska bounding envelope
         if 51.0 <= lat <= 71.5 and -180.0 <= lon <= -129.0:
             return True
 
-        # Hawaii
+        # Hawaii bounding envelope
         if 18.5 <= lat <= 22.5 and -160.5 <= lon <= -154.5:
             return True
 
-        # Continental US (49th parallel northern boundary)
-        if 24.396308 <= lat and -125.0 <= lon <= -66.93457:
-            if lat > 49.0:
-                # Only Lake of the Woods Northwest Angle extends above 49N up to 49.384N
-                if not (49.0 < lat <= 49.384358 and -95.3 <= lon <= -94.8):
-                    return False
+        # Check explicit Canadian border points along Great Lakes / Detroit River / St Lawrence
+        # Windsor ON is south of Detroit MI across the Detroit river:
+        if -83.040 <= lon <= -82.90 and 42.20 <= lat <= 42.325:
+            return False
 
-            # Canada border along Great Lakes / Southern Ontario:
-            # Detroit river runs between Detroit, MI and Windsor, ON.
-            # Windsor City Center is at lat 42.3149, lon -83.0364
-            # Detroit City Center is at lat 42.3314, lon -83.0458 (Detroit river border runs at ~42.325N)
-            if -83.040 <= lon <= -82.90 and 42.20 <= lat <= 42.325:
-                # Strictly Windsor / Essex County, Canada
+        # Fort Erie, Canada (across from Buffalo NY):
+        if -79.05 <= lon <= -78.90 and 42.88 <= lat <= 42.96:
+            return False
+
+        # Tijuana, Mexico (south of San Diego border ~32.534N):
+        if -117.2 <= lon <= -116.8 and lat < 32.534:
+            return False
+
+        # General Mexico border
+        if lat < 25.837:
+            return False
+
+        # 49th parallel northern boundary
+        if lat > 49.0:
+            if not (49.0 < lat <= 49.384358 and -95.3 <= lon <= -94.8):
                 return False
 
-            if -83.5 <= lon <= -75.0 and lat >= 42.0:
-                # Toronto / Hamilton / Niagara Peninsula (Canada)
-                if -80.5 <= lon <= -78.8 and lat >= 43.1:
-                    return False
-                if -83.0 <= lon <= -81.0 and lat >= 42.5:
-                    return False
+        # Check against loaded US GeoJSON polygon
+        if US_POLYGON is not None:
+            pt = Point(lon, lat)
+            # True if point is inside US polygon or directly on the coastal boundary
+            return US_POLYGON.contains(pt) or US_POLYGON.distance(pt) < 0.005
 
-            # Mexico border around Tijuana / San Diego:
-            # Tijuana is lat 32.51N, lon -117.03W; US border is ~32.534N
-            if -117.2 <= lon <= -116.8 and lat < 32.534:
-                return False
-
-            # Mexican border in Arizona / New Mexico / Texas (latitudes below ~25.8N are Mexico)
-            if lat < 25.837:
-                return False
-
-            return True
-
-        return False
+        # Fallback only if polygon could not be loaded
+        return (24.396308 <= lat <= 49.384358 and -125.0 <= lon <= -66.93457)
