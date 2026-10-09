@@ -26,6 +26,6 @@ class RoutePlanRequestSerializer(serializers.Serializer):
     )
     allow_approximate_stations = serializers.BooleanField(
         required=False,
-        default=True,
-        help_text="Allow stations enriched at city-centroid accuracy. If false, only exact stations are eligible."
+        default=False,
+        help_text="Allow stations enriched with approximate city-centroid coordinates. Defaults to FALSE for physical location accuracy."
     )

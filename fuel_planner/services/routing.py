@@ -52,7 +52,7 @@ class RoutingProvider:
         payload = {
             'coordinates': coordinates,
             'radiuses': [-1] * len(coordinates),
-            'instructions': False,
+            'instructions': True,
             'elevation': False
         }
 

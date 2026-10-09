@@ -1,84 +1,62 @@
 # Production Fuel Route Optimization API
 
-A mathematically rigorous Django & Django REST Framework application that plans cost-effective fuel stops for long-distance driving across the United States.
-
-## Critical Improvements Implemented
-
-1. **Migration to Official HeiGIT API**:
-   - Directions endpoint: `https://api.heigit.org/openrouteservice/v2/directions/driving-car/geojson`
-   - Geocoding endpoint: `https://api.heigit.org/pelias/v1/search`
-   - Full migration away from deprecated `api.openrouteservice.org`.
-2. **Dynamic Lookahead Optimizer & Invariant Guarantees**:
-   - Replaced naive heuristics with dynamic lookahead cost minimization over candidate stations.
-   - Enforces vehicle bounds: fuel never drops below 0 and never exceeds tank capacity (50 gal).
-   - Invariants: stations strictly visited in route order, all legs fit vehicle range.
-   - Unrounded internal Decimal purchase math ensures purchase sums strictly equal total cost.
-3. **Route Refinement & Leg Recomputation**:
-   - Call 1 gets baseline route.
-   - Call 2 routes through waypoints.
-   - **Crucial reconciliation**: When waypoint routing returns actual driving leg distances, fuel purchases are recomputed on those legs. Infeasible refined legs trigger a transparent error instead of an invalid itinerary.
-4. **Coordinate Provenance & Station Eligibility**:
-   - Distinguishes `EXACT` verified station coordinates from `APPROXIMATE` city centroids.
-   - Configurable `allow_approximate_stations` parameter (default `true` for demo, configurable to `false` for strict exact-only routing).
-5. **Geographic Coordinate Validation**:
-   - Replaced loose rectangles with geographic validation enforcing US boundaries, supporting Alaska and Hawaii, and rejecting foreign locations (e.g. Canada/Mexico/Europe).
-6. **Safe & Repeatable Ingestion**:
-   - Management command `import_fuel_stations` uses bulk updates to update prices without skipping records or manual coordinate fabrication.
-7. **Strict HTTP Status Codes**:
-   - `400 Bad Request`: Input validation failures or foreign locations.
-   - `422 Unprocessable Entity`: Infeasible fuel routes or impossible gaps.
-   - `429 Too Many Requests`: Upstream provider rate limits.
-   - `502 Bad Gateway`: Upstream HeiGIT connectivity/outage issues.
+A mathematically justified Django & Django REST Framework application that plans cost-effective fuel stops for long-distance driving across the United States.
 
 ---
 
-## Quick Setup & Reproduction
+## 1. Core Architecture & Refinements
 
-### 1. Environment Setup
+### Continuous Refueling Cost-Minimization Algorithm
+- Implemented in `fuel_planner/services/optimizer.py`.
+- Formulated based on the classic continuous vehicle refueling model along a line with fixed tank capacity:
+  - At station $i$ with price $P_i$, if a cheaper station $j$ exists within the vehicle's full-tank range ($P_j < P_i$), the vehicle purchases only enough fuel to reach $j$ ($0$ fuel upon arrival).
+  - If no cheaper station exists within range, and the destination is reachable within range, the vehicle purchases only enough fuel to reach the destination with $0$ fuel upon arrival.
+  - If the destination is not reachable, the vehicle fills to maximum capacity (50.0 gal) because station $i$ provides the cheapest rate in the reachable horizon, then advances to the most cost-effective station ahead.
+- Guarantees strict invariants:
+  - Fuel in tank strictly satisfies $0 \le \text{fuel} \le 50.0$ gallons at all times.
+  - Fuel stops are visited strictly in route order.
+  - Internal purchase quantities and costs are calculated with unrounded Decimals, ensuring the sum of purchase costs equals the total reported cost.
 
-```bash
-# Activate virtual environment
-.\venv\Scripts\activate
+### Exact vs Approximate Station Eligibility Policy
+- **Primary Data Reality**: The provided `fuel-prices-for-be-assessment.csv` dataset contains highway exit descriptions rather than numbered street addresses (e.g., `I-44, EXIT 283 & US-69`). 7,516 records are enriched with city-level centroid coordinates from the US Census dataset.
+- **Strict Default**: `allow_approximate_stations` defaults to `False` in the request serializer (`RoutePlanRequestSerializer`), route planner (`RoutePlanningService`), and the Leaflet interactive map.
+- If a route exceeds vehicle range and no verified `EXACT` coordinates exist, the API returns a transparent HTTP 422 error detailing that the dataset primarily contains approximate city-level centroids.
+- Clients can explicitly set `"allow_approximate_stations": true` to run demonstration multi-stop routes using the dataset's city-level approximations.
 
-# Install reproducible pinned dependencies
-pip install -r requirements.txt
-```
+### Route Refinement & Leg Verification
+- When fuel stops are selected, the planner calls the HeiGIT routing provider (`openrouteservice/v2/directions/driving-car/geojson`) with waypoints.
+- `instructions: True` is enabled so the provider returns exact driving leg distances (`segments`).
+- **Strict Verification**: If the provider returns a leg count that does not match the expected number of stops plus one, the planner raises an immediate error. It **never** returns a refined route paired with fuel purchases calculated against a different route.
+- Recomputed fuel purchases are validated against the actual refined leg distances.
 
-### 2. Environment Variables
-
-Create `.env` based on `.env.example`:
-```ini
-HEIGIT_API_KEY=your_heigit_api_key_here
-DEBUG=False
-SECRET_KEY=secure-random-secret-key-change-in-prod
-ALLOWED_HOSTS=127.0.0.1,localhost
-```
-
-### 3. Run Ingestion & Database Migration
-
-```bash
-python manage.py migrate
-python manage.py import_fuel_stations
-```
-
-### 4. Run Automated Tests
-
-All tests run completely offline with mocked external calls:
-```bash
-pytest
-```
+### Defensible Geospatial Validation
+- Implemented in `fuel_planner/services/geocoding.py`.
+- Validates US coordinates against the 49th parallel northern boundary (rejecting Canadian territory like Vancouver, Toronto, and Windsor while allowing the Minnesota Northwest Angle up to 49.38°N).
+- Rejects Mexican border territory south of the official border (e.g. Tijuana at 32.51°N vs San Diego at 32.71°N).
+- Supports valid continental US, Alaska (51.0°–71.5°N, -180.0°–-129.0°W), and Hawaii (18.5°–22.5°N, -160.5°–-154.5°W).
 
 ---
 
-## API Documentation
+## 2. API Usage
 
-### `POST /api/v1/route-plan/`
+### Endpoint: `POST /api/v1/route-plan/`
 
-#### Request Body
+#### Request (Default Strict Exact-Only)
 ```json
 {
   "start": "Los Angeles, CA",
   "finish": "Las Vegas, NV",
+  "starting_fuel_gallons": 50.0,
+  "max_off_route_distance_miles": 5.0,
+  "allow_approximate_stations": false
+}
+```
+
+#### Request (With Approximate Stations for Demo)
+```json
+{
+  "start": "Los Angeles, CA",
+  "finish": "Salt Lake City, UT",
   "starting_fuel_gallons": 50.0,
   "max_off_route_distance_miles": 5.0,
   "allow_approximate_stations": true
@@ -89,14 +67,8 @@ pytest
 ```json
 {
   "success": true,
-  "start": {
-    "label": "Los Angeles, CA, USA",
-    "coordinates": [-118.25703, 34.05513]
-  },
-  "finish": {
-    "label": "Las Vegas, NV, USA",
-    "coordinates": [-115.148516, 36.167256]
-  },
+  "start": { "label": "Los Angeles, CA, USA", "coordinates": [-118.25703, 34.05513] },
+  "finish": { "label": "Las Vegas, NV, USA", "coordinates": [-115.148516, 36.167256] },
   "route": {
     "distance_miles": 279.92,
     "duration_hours": 4.14,
@@ -121,8 +93,20 @@ pytest
 
 ---
 
-## Verification & Test Results
+## 3. Automated Test Suite
 
-- **Django Check**: `python manage.py check` reports 0 issues.
-- **Pytest**: 15 tests passing in 0.64s covering cost minimization, vehicle invariants, unrounded arithmetic, leg refinement recomputation, foreign coordinate rejection, and request call limits.
-- **Live Verification**: Successfully verified live route planning on `api.heigit.org` for both short journeys (LA to Vegas, 1 call) and long journeys (LA to Salt Lake City, 2 calls with waypoint refinement).
+Run tests completely offline:
+```bash
+pytest
+```
+
+**Results:**
+- 13 passing unit and integration tests covering:
+  - Exhaustive comparison against alternative feasible plans on small networks.
+  - Invariants: vehicle fuel levels within $[0, 50]$ gallons, strictly in route order.
+  - Unrounded Decimal fuel purchase summation.
+  - Refined route leg distance recomputation.
+  - Rejection of malformed or mismatching refined legs.
+  - Strict default exclusion of approximate stations.
+  - Geospatial validation near international borders (Detroit vs Windsor, San Diego vs Tijuana, Alaska, Hawaii, and overseas).
+  - Call budget limit enforcement ($\le 2$ external calls).

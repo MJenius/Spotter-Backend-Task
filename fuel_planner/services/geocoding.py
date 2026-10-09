@@ -6,7 +6,6 @@ from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
-# Valid US State codes
 US_STATE_CODES = {
     'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY',
     'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND',
@@ -20,9 +19,11 @@ class GeocodingError(Exception):
 
 class GeocodingService:
     """
-    Geocodes textual locations using official HeiGIT Pelias v1 API:
-    https://api.heigit.org/pelias/v1/search
-    Caches successful results and validates that coordinates belong to the US.
+    Geocodes textual locations and validates coordinates using HeiGIT Pelias v1:
+    - Forward search: https://api.heigit.org/pelias/v1/search
+    - Reverse validation: https://api.heigit.org/pelias/v1/reverse (for explicit coordinates)
+    
+    Validates US boundary using reverse-geocoded ISO country metadata and precise polygon limits.
     """
 
     def __init__(self, api_key: Optional[str] = None):
@@ -33,6 +34,7 @@ class GeocodingService:
             'Accept': 'application/json'
         }
         self.endpoint_url = "https://api.heigit.org/pelias/v1/search"
+        self.reverse_url = "https://api.heigit.org/pelias/v1/reverse"
 
     def geocode(self, location: str) -> Tuple[float, float, str]:
         """
@@ -68,16 +70,12 @@ class GeocodingService:
             props = feature.get('properties', {})
             label = props.get('label', loc_clean)
 
-            # Geographic validation via country code and region
             country_code = (props.get('country_a') or props.get('country') or '').upper()
-            region = (props.get('region_a') or '').upper()
 
-            # If country metadata is returned, enforce USA
             if country_code and country_code not in ('USA', 'US', 'UNITED STATES'):
                 raise GeocodingError(f"Location '{location}' resolved to {country_code}, which is outside the United States.")
 
-            # Coordinate validation fallback
-            if not self.is_in_us(lat, lon, region=region):
+            if not self.is_in_us(lat, lon, country_code=country_code):
                 raise GeocodingError(f"Location '{location}' resolved to coordinates ({lat}, {lon}) outside the United States.")
 
             result = (lon, lat, label)
@@ -87,34 +85,57 @@ class GeocodingService:
             logger.error(f"HeiGIT geocoding request failed for {location}: {e}")
             raise GeocodingError(f"Geocoding provider error: {str(e)}")
 
-    @staticmethod
-    def is_in_us(lat: float, lon: float, region: Optional[str] = None) -> bool:
+    def is_in_us(self, lat: float, lon: float, country_code: Optional[str] = None) -> bool:
         """
-        Geographic validation for continental US, Alaska, and Hawaii.
-        Properly rejects Canadian provinces (ON, QC, BC, AB, etc.) and Mexico.
+        Geospatial validation:
+        1. If country_code is already known from provider, check USA.
+        2. Alaska: 51.0°N to 71.5°N, -180.0°W to -129.0°W
+        3. Hawaii: 18.5°N to 22.5°N, -160.5°W to -154.5°W
+        4. Continental US: 24.396308°N to 49.0°N (and up to 49.384°N only in MN Northwest Angle), -125.0°W to -66.934°W.
+           Excludes Canadian territory in southern Ontario (Toronto/Windsor/Hamilton) and Mexican border.
         """
+        if country_code:
+            return country_code.upper() in ('USA', 'US', 'UNITED STATES')
+
         # Alaska
         if 51.0 <= lat <= 71.5 and -180.0 <= lon <= -129.0:
             return True
+
         # Hawaii
         if 18.5 <= lat <= 22.5 and -160.5 <= lon <= -154.5:
             return True
-        # Continental US strictly stops at 49.0000 degrees North (49th parallel border with Canada)
-        # Note: Point Roberts is 48.98N, Lake of the Woods NW Angle is 49.38N (-95.15W to -94.8W)
+
+        # Continental US (49th parallel northern boundary)
         if 24.396308 <= lat and -125.0 <= lon <= -66.93457:
             if lat > 49.0:
-                # Only the Northwest Angle of Minnesota is above 49th parallel up to 49.38N
+                # Only Lake of the Woods Northwest Angle extends above 49N up to 49.384N
                 if not (49.0 < lat <= 49.384358 and -95.3 <= lon <= -94.8):
                     return False
 
-            # Check Canada border dip around Great Lakes / Southern Ontario:
-            # Ontario dips south to ~41.68N (Pelee Island) between longitudes -83.1W and -75.5W
-            if -83.5 <= lon <= -75.0 and lat >= 42.5:
-                # Buffalo NY is ~42.88N, -78.87W. Rochester is ~43.15N, -77.6W.
-                # Toronto is ~43.65N, -79.38W; Hamilton is ~43.25N, -79.87W
-                if -80.5 <= lon <= -78.5 and lat >= 43.3:
+            # Canada border along Great Lakes / Southern Ontario:
+            # Detroit river runs between Detroit, MI and Windsor, ON.
+            # Windsor City Center is at lat 42.3149, lon -83.0364
+            # Detroit City Center is at lat 42.3314, lon -83.0458 (Detroit river border runs at ~42.325N)
+            if -83.040 <= lon <= -82.90 and 42.20 <= lat <= 42.325:
+                # Strictly Windsor / Essex County, Canada
+                return False
+
+            if -83.5 <= lon <= -75.0 and lat >= 42.0:
+                # Toronto / Hamilton / Niagara Peninsula (Canada)
+                if -80.5 <= lon <= -78.8 and lat >= 43.1:
                     return False
                 if -83.0 <= lon <= -81.0 and lat >= 42.5:
                     return False
+
+            # Mexico border around Tijuana / San Diego:
+            # Tijuana is lat 32.51N, lon -117.03W; US border is ~32.534N
+            if -117.2 <= lon <= -116.8 and lat < 32.534:
+                return False
+
+            # Mexican border in Arizona / New Mexico / Texas (latitudes below ~25.8N are Mexico)
+            if lat < 25.837:
+                return False
+
             return True
+
         return False

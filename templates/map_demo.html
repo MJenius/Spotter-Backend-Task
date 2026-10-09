@@ -58,6 +58,13 @@
                 <label>Starting Fuel (Gallons)</label>
                 <input type="number" id="startingFuel" class="form-control" value="50.0" min="0" max="50" step="1">
             </div>
+            <div class="form-group" style="display:flex; align-items:flex-start; gap:8px;">
+                <input type="checkbox" id="allowApprox" style="margin-top:4px;">
+                <label for="allowApprox" style="text-transform:none; font-size:0.75rem; color:#475569; font-weight:normal; margin:0; cursor:pointer;">
+                    <strong>Allow Approximate City-Centroid Stations</strong><br>
+                    <span style="color:#64748b;">(Disabled by default for coordinate accuracy. Enable to demonstrate multi-stop routing with dataset's city-level records).</span>
+                </label>
+            </div>
             <button id="planBtn" class="btn-submit" onclick="calculateRoute()">Calculate Fuel Route</button>
             <div class="presets">
                 <span class="badge-preset" onclick="setPreset('Los Angeles, CA', 'Las Vegas, NV', 50)">LA &rarr; Vegas (270 mi)</span>
@@ -96,6 +103,8 @@
             const finish = document.getElementById('finishInput').value.trim();
             const startingFuel = parseFloat(document.getElementById('startingFuel').value) || 50.0;
 
+            const allowApprox = document.getElementById('allowApprox').checked;
+
             if (!start || !finish) {
                 alert('Please provide both start and destination locations.');
                 return;
@@ -113,7 +122,8 @@
                     body: JSON.stringify({
                         start: start,
                         finish: finish,
-                        starting_fuel_gallons: startingFuel
+                        starting_fuel_gallons: startingFuel,
+                        allow_approximate_stations: allowApprox
                     })
                 });
 

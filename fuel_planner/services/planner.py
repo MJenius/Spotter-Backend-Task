@@ -15,11 +15,12 @@ class RoutePlanningService:
     Coordinates end-to-end fuel-route optimization:
     1. Geocodes Start & Finish or validates explicit coordinates.
     2. Call 1 (Baseline): Obtains driving geometry & baseline distance.
-    3. Spatial Corridor Search: Filters candidate stations with exact vs approximate policy.
-    4. Optimizer (Provisional Plan): Solves lookahead cost-minimal refueling sequence.
+    3. Spatial Corridor Search: Filters candidate stations.
+       NOTE: Defaults strictly to verified EXACT station coordinates.
+    4. Optimizer: Solves cost-minimal refueling sequence.
     5. Call 2 (Refinement): Reroutes through exact selected station waypoints.
     6. Recomputes & verifies fuel purchases against ACTUAL refined driving legs.
-       Returns an error if the refined itinerary becomes infeasible.
+       Treats missing, malformed, or unexpected refined-leg responses as an immediate error.
     """
 
     def __init__(
@@ -34,7 +35,7 @@ class RoutePlanningService:
         self.station_searcher = station_searcher or SpatialStationSearcher(
             corridor_width_miles=10.0,
             max_off_route_distance_miles=getattr(settings, 'MAX_OFF_ROUTE_DISTANCE_MILES', 5.0),
-            include_approximate_stations=True  # Can be configured per request
+            include_approximate_stations=False  # Strict default: only EXACT coordinates
         )
         self.optimizer = optimizer or FuelRouteOptimizer(
             tank_capacity_gallons=getattr(settings, 'TANK_CAPACITY_GALLONS', 50.0),
@@ -47,7 +48,7 @@ class RoutePlanningService:
         finish_input: Any,
         starting_fuel_gallons: Optional[float] = None,
         max_off_route_distance: Optional[float] = None,
-        allow_approximate_stations: bool = True
+        allow_approximate_stations: bool = False
     ) -> Dict[str, Any]:
         starting_fuel = (
             starting_fuel_gallons
@@ -75,13 +76,22 @@ class RoutePlanningService:
             total_distance_miles=baseline_distance
         )
 
+        # If trip exceeds vehicle range and no verified stations found
         if not candidates and baseline_distance > (starting_fuel * self.optimizer.fuel_economy_mpg):
+            if not allow_approximate_stations:
+                err_msg = (
+                    f"Trip distance ({baseline_distance:.1f} mi) exceeds vehicle starting range "
+                    f"({starting_fuel * self.optimizer.fuel_economy_mpg:.1f} mi), but no verified EXACT fuel station "
+                    f"coordinates exist along this route. The supplied dataset primarily contains city-centroid approximations, "
+                    f"which are ineligible by default. Set 'allow_approximate_stations=true' if you wish to run a demonstration "
+                    f"with approximate city-level estimates."
+                )
+            else:
+                err_msg = f"No candidate fuel stations found along the route corridor for {baseline_distance:.1f} mile trip."
+            
             return {
                 'success': False,
-                'error': (
-                    "No eligible fuel stations found along the route corridor. "
-                    "If approximate city-level stations are excluded, none have verified exact coordinates."
-                ),
+                'error': err_msg,
                 'routing_provider_calls': self.routing_provider.call_count
             }
 
@@ -99,7 +109,7 @@ class RoutePlanningService:
                 'routing_provider_calls': self.routing_provider.call_count
             }
 
-        # Step 5: Route Refinement & Recomputation (Call 2 if stops exist)
+        # Step 5: Route Refinement & Strict Recomputation
         final_route = baseline_route
         final_opt_result = opt_result
 
@@ -113,33 +123,47 @@ class RoutePlanningService:
                 refined_route = self.routing_provider.get_route(waypoint_coords)
                 final_route = refined_route
 
-                # Critical Fix: Recompute and validate fuel purchases on ACTUAL refined legs!
                 leg_distances = refined_route.get('leg_distances_miles', [])
-                if len(leg_distances) == len(opt_result.fuel_stops) + 1:
-                    recomputed_result = self.optimizer.recompute_for_refined_legs(
-                        leg_distances_miles=leg_distances,
-                        planned_stops=opt_result.fuel_stops,
-                        starting_fuel_gallons=starting_fuel
-                    )
-                    if not recomputed_result.is_feasible:
-                        return {
-                            'success': False,
-                            'error': (
-                                f"Refined route through recommended stops became infeasible: "
-                                f"{recomputed_result.error_message}"
-                            ),
-                            'routing_provider_calls': self.routing_provider.call_count
-                        }
-                    final_opt_result = recomputed_result
+                expected_leg_count = len(opt_result.fuel_stops) + 1
+
+                # Critical check: Treat malformed or mismatching legs as an explicit error!
+                if len(leg_distances) != expected_leg_count:
+                    return {
+                        'success': False,
+                        'error': (
+                            f"Refinement routing error: expected {expected_leg_count} legs for {len(opt_result.fuel_stops)} "
+                            f"fuel stops, but provider returned {len(leg_distances)} legs. Refined plan cannot be verified."
+                        ),
+                        'routing_provider_calls': self.routing_provider.call_count
+                    }
+
+                recomputed_result = self.optimizer.recompute_for_refined_legs(
+                    leg_distances_miles=leg_distances,
+                    planned_stops=opt_result.fuel_stops,
+                    starting_fuel_gallons=starting_fuel
+                )
+
+                if not recomputed_result.is_feasible:
+                    return {
+                        'success': False,
+                        'error': (
+                            f"Refined route through recommended stops became infeasible: "
+                            f"{recomputed_result.error_message}"
+                        ),
+                        'routing_provider_calls': self.routing_provider.call_count
+                    }
+
+                final_opt_result = recomputed_result
+
             except RoutingError as e:
-                logger.warning(f"Refinement routing call failed: {e}. Aborting with error.")
+                logger.warning(f"Refinement routing call failed: {e}. Aborting.")
                 return {
                     'success': False,
                     'error': f"Failed to calculate refined driving route through waypoints: {str(e)}",
                     'routing_provider_calls': self.routing_provider.call_count
                 }
 
-        # Serialize verified fuel stops
+        # Serialize fuel stops
         fuel_stops_data = [
             {
                 'sequence': s.sequence,
@@ -195,7 +219,11 @@ class RoutePlanningService:
             'data_quality': {
                 'candidate_stations_in_corridor': len(candidates),
                 'approximate_stations_permitted': allow_approximate_stations,
-                'note': "Fuel prices taken directly from OPIS CSV dataset. Station locations are based on city/highway enrichment."
+                'coordinate_provenance': 'verified_exact_only' if not allow_approximate_stations else 'approximate_city_centroid_fallback',
+                'note': (
+                    "When allow_approximate_stations is False, only verified EXACT coordinates are eligible. "
+                    "Perpendicular distance to route represents proximity; real leg driving distances are obtained via route refinement."
+                )
             }
         }
 
