@@ -139,8 +139,26 @@ class FuelRouteOptimizer:
         candidate_stations: List[StationCandidate],
         starting_fuel_gallons: float = 50.0,
     ) -> OptimizationResult:
+        import math
+
+        if not (isinstance(self.tank_capacity, (int, float)) and math.isfinite(self.tank_capacity) and self.tank_capacity > 0):
+            raise ValueError(f"Tank capacity must be positive and finite, got {self.tank_capacity}.")
+        if not (isinstance(self.fuel_economy_mpg, (int, float)) and math.isfinite(self.fuel_economy_mpg) and self.fuel_economy_mpg > 0):
+            raise ValueError(f"Fuel economy MPG must be positive and finite, got {self.fuel_economy_mpg}.")
+        if not (isinstance(total_distance_miles, (int, float)) and math.isfinite(total_distance_miles) and total_distance_miles >= 0):
+            raise ValueError(f"Total distance must be non-negative and finite, got {total_distance_miles}.")
+        if not (isinstance(starting_fuel_gallons, (int, float)) and math.isfinite(starting_fuel_gallons)):
+            raise ValueError(f"Starting fuel must be a finite number, got {starting_fuel_gallons}.")
         if starting_fuel_gallons < 0.0 or starting_fuel_gallons > self.tank_capacity:
             raise ValueError(f"Starting fuel must be between 0.0 and {self.tank_capacity} gallons.")
+
+        for idx, s in enumerate(candidate_stations):
+            if not (math.isfinite(s.route_position_miles) and s.route_position_miles >= 0):
+                raise ValueError(f"Candidate station {s.station_id} at index {idx} has invalid route position {s.route_position_miles}.")
+            if s.price_per_gallon <= Decimal("0.00") or s.price_per_gallon.is_nan() or s.price_per_gallon.is_infinite():
+                raise ValueError(f"Candidate station {s.station_id} at index {idx} has invalid price {s.price_per_gallon}.")
+            if not (math.isfinite(s.access_miles_one_way) and s.access_miles_one_way >= 0):
+                raise ValueError(f"Candidate station {s.station_id} at index {idx} has invalid access distance {s.access_miles_one_way}.")
 
         C = _frac(self.tank_capacity)
         mpg = _frac(self.fuel_economy_mpg)

@@ -364,3 +364,128 @@ class TestFuelPlannerRigorousSuite:
             )
             assert res['success'] is False
             assert "Route refinement discrepancy" in res['error']
+
+    # 10. Test CSV Import schema validation & transaction rollback on failure
+    def test_import_fuel_stations_atomic_rollback(self, tmp_path):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        # Create a valid CSV with 1 station
+        csv_file = tmp_path / "stations.csv"
+        csv_file.write_text(
+            "OPIS Truckstop ID,Truckstop Name,Address,City,State,Rack ID,Retail Price\n"
+            "99999,Atomic Test Stop,123 Main St,Barstow,CA,1,3.500\n",
+            encoding="utf-8"
+        )
+
+        initial_count = FuelStation.objects.count()
+        assert initial_count > 0
+
+        # Simulate failure during save/bulk_create inside the command
+        with patch('fuel_planner.models.FuelStation.objects.bulk_create', side_effect=RuntimeError("Simulated DB Crash")):
+            with pytest.raises(RuntimeError):
+                call_command('import_fuel_stations', csv_path=str(csv_file), clear=True)
+
+        # Confirm rollback: stations should NOT have been cleared because the transaction aborted
+        assert FuelStation.objects.count() == initial_count
+
+    # 11. Test CSV Import rejects missing headers
+    def test_import_fuel_stations_missing_headers(self, tmp_path):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        bad_csv = tmp_path / "bad.csv"
+        bad_csv.write_text("ID,Name,Price\n1,Bad,3.00\n", encoding="utf-8")
+
+        with pytest.raises(CommandError) as exc_info:
+            call_command('import_fuel_stations', csv_path=str(bad_csv))
+        assert "missing mandatory columns" in str(exc_info.value).lower()
+
+    # 12. Test Routing Response Schema Validation (segments sum, missing summary, bad linestring)
+    def test_routing_provider_schema_validation(self):
+        from fuel_planner.services.routing import RoutingSchemaError
+
+        provider = RoutingProvider(api_key="test-key")
+
+        # Missing summary distance
+        bad_response = {
+            'features': [{
+                'type': 'Feature',
+                'geometry': {'type': 'LineString', 'coordinates': [[-118.0, 34.0], [-117.0, 34.0]]},
+                'properties': {
+                    'summary': {'duration': 100.0},  # missing 'distance'
+                    'segments': [{'distance': 1000.0}]
+                }
+            }]
+        }
+        with patch('requests.post') as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = bad_response
+            with pytest.raises(RoutingSchemaError):
+                provider.get_route([(-118.0, 34.0), (-117.0, 34.0)], use_cache=False)
+
+        # Segments distance sum mismatch vs total summary distance
+        bad_sum_response = {
+            'features': [{
+                'type': 'Feature',
+                'geometry': {'type': 'LineString', 'coordinates': [[-118.0, 34.0], [-117.0, 34.0]]},
+                'properties': {
+                    'summary': {'distance': 10000.0, 'duration': 100.0},
+                    'segments': [{'distance': 1000.0}]  # 1000 != 10000
+                }
+            }]
+        }
+        with patch('requests.post') as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = bad_sum_response
+            with pytest.raises(RoutingSchemaError):
+                provider.get_route([(-118.0, 34.0), (-117.0, 34.0)], use_cache=False)
+
+    # 13. Test Routing cache key uniqueness for close coordinates
+    def test_routing_cache_key_precision(self):
+        # Two routes with coordinates differing only beyond 4 decimal places
+        coords1 = [(-118.243681, 34.052235), (-117.017311, 34.895811)]
+        coords2 = [(-118.243689, 34.052239), (-117.017311, 34.895811)]
+        k1 = RoutingProvider.compute_cache_key(coords1)
+        k2 = RoutingProvider.compute_cache_key(coords2)
+        assert k1 != k2
+
+    # 14. Test Optimizer strict numeric input validation
+    def test_optimizer_numeric_validation(self):
+        opt = FuelRouteOptimizer()
+        with pytest.raises(ValueError):
+            opt.optimize(-100.0, [])
+        with pytest.raises(ValueError):
+            opt.optimize(float('nan'), [])
+        with pytest.raises(ValueError):
+            opt.optimize(100.0, [], starting_fuel_gallons=float('inf'))
+        with pytest.raises(ValueError):
+            bad_candidate = StationCandidate("s1", "S1", 34.0, -118.0, Decimal("-1.00"), 50.0)
+            opt.optimize(100.0, [bad_candidate])
+
+    # 15. Test API typed error mapping for rate limits and auth failures
+    def test_api_view_typed_error_handling(self):
+        from fuel_planner.services.geocoding import GeocodingRateLimitError, GeocodingAuthError
+        from fuel_planner.services.routing import RoutingRateLimitError, RoutingAuthError
+
+        client = APIClient()
+
+        # Geocoding Rate Limit -> 429
+        with patch.object(RoutePlanningService, 'plan_route', side_effect=GeocodingRateLimitError("429 limit")):
+            res = client.post('/api/v1/route-plan/', {'start': 'Los Angeles, CA', 'finish': 'Las Vegas, NV'}, format='json')
+            assert res.status_code == 429
+
+        # Geocoding Auth Error -> 502
+        with patch.object(RoutePlanningService, 'plan_route', side_effect=GeocodingAuthError("401 auth")):
+            res = client.post('/api/v1/route-plan/', {'start': 'Los Angeles, CA', 'finish': 'Las Vegas, NV'}, format='json')
+            assert res.status_code == 502
+
+        # Routing Rate Limit -> 429
+        with patch.object(RoutePlanningService, 'plan_route', side_effect=RoutingRateLimitError("429 routing")):
+            res = client.post('/api/v1/route-plan/', {'start': 'Los Angeles, CA', 'finish': 'Las Vegas, NV'}, format='json')
+            assert res.status_code == 429
+
+        # Routing Auth Error -> 502
+        with patch.object(RoutePlanningService, 'plan_route', side_effect=RoutingAuthError("401 routing auth")):
+            res = client.post('/api/v1/route-plan/', {'start': 'Los Angeles, CA', 'finish': 'Las Vegas, NV'}, format='json')
+            assert res.status_code == 502

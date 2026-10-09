@@ -160,13 +160,17 @@ pytest -v
 ```
 
 **Results:**
-- **265 passing unit, integration, and brute-force tests** covering:
+- **274 passing unit, integration, and brute-force tests** covering:
   - 250 randomized network scenarios mathematically verifying that the exact DP optimizer matches independent combinatorial brute-force solutions to the penny.
   - Strict invariants: vehicle fuel levels within $[0, 50]$ gallons at all points, stops strictly visited in route order.
   - Access distance charging and off-route detour evaluation.
   - Unrounded Decimal fuel purchase summation and invariant checks.
   - Refined route leg distance recomputation and sequence reconciliation.
-  - Rejection of malformed or mismatching refined legs.
+  - Rejection of malformed, mismatched, non-positive, or non-finite refined legs and geometries.
+  - Upstream provider response schema validation and segment-distance summation verification.
+  - Collision-free, full-precision SHA256 caching for both geocoding and routing queries.
+  - Atomic CSV ingestion inside single database transaction with upfront column validation.
+  - Typed exception mapping (`GeocodingRateLimitError`, `RoutingAuthError`, etc.) to accurate HTTP status codes (400, 422, 429, 502).
   - Strict default exclusion of approximate stations in serializers, views, and planner services.
   - Production `SECRET_KEY` validation preventing insecure defaults when `DEBUG=False`.
   - Geospatial validation using official US boundary GeoJSON with high-resolution sovereign boundary checks (USA, Canada, and Mexico) correctly discriminating close border pairs (Detroit vs Windsor, Buffalo vs Fort Erie, San Diego vs Tijuana, Alaska, Hawaii, and ocean coordinates).

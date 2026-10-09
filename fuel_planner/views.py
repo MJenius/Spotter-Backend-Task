@@ -6,8 +6,20 @@ from rest_framework import status
 from rest_framework.views import exception_handler
 from fuel_planner.serializers import RoutePlanRequestSerializer
 from fuel_planner.services.planner import RoutePlanningService
-from fuel_planner.services.geocoding import GeocodingError
-from fuel_planner.services.routing import RoutingError
+from fuel_planner.services.geocoding import (
+    GeocodingError,
+    GeocodingRateLimitError,
+    GeocodingAuthError,
+    GeocodingLocationNotFoundError,
+    GeocodingProviderError,
+)
+from fuel_planner.services.routing import (
+    RoutingError,
+    RoutingRateLimitError,
+    RoutingAuthError,
+    RoutingNotFoundError,
+    RoutingSchemaError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +39,7 @@ class RoutePlanAPIView(APIView):
     POST /api/v1/route-plan/
     Plans fuel stops along a driving route within the United States.
     Distinguishes client validation errors (400), unprocessable plans (422),
-    and provider errors (502/503).
+    upstream rate limits (429), and upstream provider errors (502).
     """
 
     def post(self, request, *args, **kwargs):
@@ -59,22 +71,27 @@ class RoutePlanAPIView(APIView):
 
             return Response(result, status=status.HTTP_200_OK)
 
+        except GeocodingRateLimitError as e:
+            return Response({'success': False, 'error': str(e)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        except GeocodingAuthError as e:
+            return Response({'success': False, 'error': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+        except GeocodingLocationNotFoundError as e:
+            return Response({'success': False, 'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except GeocodingProviderError as e:
+            return Response({'success': False, 'error': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
         except GeocodingError as e:
-            err_msg = str(e)
-            if "rate limit" in err_msg.lower():
-                return Response({'success': False, 'error': err_msg}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-            if "provider error" in err_msg.lower() or "authentication" in err_msg.lower():
-                return Response({'success': False, 'error': err_msg}, status=status.HTTP_502_BAD_GATEWAY)
-            # Input outside USA or not found
-            return Response({'success': False, 'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'success': False, 'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+        except RoutingRateLimitError as e:
+            return Response({'success': False, 'error': str(e)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        except RoutingAuthError as e:
+            return Response({'success': False, 'error': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+        except RoutingNotFoundError as e:
+            return Response({'success': False, 'error': str(e)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        except RoutingSchemaError as e:
+            return Response({'success': False, 'error': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
         except RoutingError as e:
-            err_msg = str(e)
-            if "rate limit" in err_msg.lower():
-                return Response({'success': False, 'error': err_msg}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-            if "not found" in err_msg.lower() or "no driving route" in err_msg.lower():
-                return Response({'success': False, 'error': err_msg}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-            return Response({'success': False, 'error': err_msg}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response({'success': False, 'error': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
 
         except Exception as e:
             logger.exception("Unexpected error during route planning")

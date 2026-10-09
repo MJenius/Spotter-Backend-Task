@@ -1,5 +1,6 @@
-import logging
+import hashlib
 import json
+import logging
 from pathlib import Path
 import requests
 from typing import Tuple, Dict, Any, Optional
@@ -37,6 +38,27 @@ if BOUNDARY_FILE.exists():
 
 
 class GeocodingError(Exception):
+    """Base exception for geocoding failures."""
+    pass
+
+
+class GeocodingRateLimitError(GeocodingError):
+    """Raised when upstream geocoding returns HTTP 429."""
+    pass
+
+
+class GeocodingAuthError(GeocodingError):
+    """Raised when upstream geocoding returns HTTP 401 or 403."""
+    pass
+
+
+class GeocodingLocationNotFoundError(GeocodingError):
+    """Raised when location cannot be found or is outside the US."""
+    pass
+
+
+class GeocodingProviderError(GeocodingError):
+    """Raised when upstream geocoding fails due to network/server errors."""
     pass
 
 
@@ -60,9 +82,18 @@ class GeocodingService:
         self.endpoint_url = "https://api.heigit.org/pelias/v1/search"
         self.reverse_url = "https://api.heigit.org/pelias/v1/reverse"
 
+    @staticmethod
+    def compute_cache_key(location: str) -> str:
+        loc_normalized = " ".join(location.strip().lower().split())
+        digest = hashlib.sha256(loc_normalized.encode('utf-8')).hexdigest()
+        return f"heigit_geocode_v2_{digest}"
+
     def geocode(self, location: str) -> Tuple[float, float, str]:
         loc_clean = location.strip()
-        cache_key = f"heigit_geocode_{loc_clean.lower().replace(' ', '_')}"
+        if not loc_clean:
+            raise GeocodingLocationNotFoundError("Location query cannot be empty.")
+
+        cache_key = self.compute_cache_key(loc_clean)
         cached = cache.get(cache_key)
         if cached:
             return cached
@@ -75,15 +106,15 @@ class GeocodingService:
         try:
             resp = requests.get(self.endpoint_url, params=params, headers=self.headers, timeout=8.0)
             if resp.status_code == 429:
-                raise GeocodingError("Geocoding service rate limit exceeded. Please retry shortly.")
+                raise GeocodingRateLimitError("Geocoding service rate limit exceeded (HTTP 429). Please retry shortly.")
             if resp.status_code in (401, 403):
-                raise GeocodingError("Geocoding provider authentication failed. Please check the HeiGIT API key.")
+                raise GeocodingAuthError("Geocoding provider authentication failed. Please check the HeiGIT API key.")
             resp.raise_for_status()
 
             data = resp.json()
             features = data.get('features', [])
             if not features:
-                raise GeocodingError(f"Could not locate '{location}'. Please specify a valid US city or address.")
+                raise GeocodingLocationNotFoundError(f"Could not locate '{location}'. Please specify a valid US city or address.")
 
             feature = features[0]
             coords = feature['geometry']['coordinates']  # [lon, lat]
@@ -94,17 +125,17 @@ class GeocodingService:
             country_code = (props.get('country_a') or props.get('country') or '').upper()
 
             if country_code and country_code not in ('USA', 'US', 'UNITED STATES'):
-                raise GeocodingError(f"Location '{location}' resolved to {country_code}, which is outside the United States.")
+                raise GeocodingLocationNotFoundError(f"Location '{location}' resolved to {country_code}, which is outside the United States.")
 
             if not self.is_in_us(lat, lon, country_code=country_code):
-                raise GeocodingError(f"Location '{location}' resolved to coordinates ({lat}, {lon}) outside the United States.")
+                raise GeocodingLocationNotFoundError(f"Location '{location}' resolved to coordinates ({lat}, {lon}) outside the United States.")
 
             result = (lon, lat, label)
             cache.set(cache_key, result, timeout=86400 * 7)
             return result
         except requests.RequestException as e:
             logger.error(f"HeiGIT geocoding request failed for {location}: {e}")
-            raise GeocodingError(f"Geocoding provider error: {str(e)}")
+            raise GeocodingProviderError(f"Geocoding provider error: {str(e)}")
 
     def is_in_us(self, lat: float, lon: float, country_code: Optional[str] = None) -> bool:
         """
