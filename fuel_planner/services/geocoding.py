@@ -135,19 +135,26 @@ class GeocodingService:
             return result
         except requests.RequestException as e:
             logger.error(f"HeiGIT geocoding request failed for {location}: {e}")
-            raise GeocodingProviderError(f"Geocoding provider error: {str(e)}")
+            raise GeocodingProviderError("Geocoding service failed due to an upstream network or communication error.")
 
     def is_in_us(self, lat: float, lon: float, country_code: Optional[str] = None) -> bool:
         """
         Geospatial sovereign US validation using authoritative sovereign boundary polygons (Natural Earth 1:10m):
-        1. If country_code from geocoder is known and foreign (e.g. CAN, MEX), reject.
-        2. If boundary data is missing/corrupted, fail closed with GeocodingError.
-        3. Reject if point falls within Canadian or Mexican sovereign boundary (CAN_POLYGON, MEX_POLYGON).
-        4. Accept if point is covered by US sovereign boundary (US_POLYGON covers), which includes Continental US,
+        1. Explicitly checks that lat/lon are finite and within physical bounds [-90, 90] and [-180, 180].
+        2. If country_code from geocoder is known and foreign (e.g. CAN, MEX), reject.
+        3. If boundary data is missing/corrupted, fail closed with GeocodingError.
+        4. Reject if point falls within Canadian or Mexican sovereign boundary (CAN_POLYGON, MEX_POLYGON).
+        5. Accept if point is covered by US sovereign boundary (US_POLYGON covers), which includes Continental US,
            Alaska, and Hawaii polygons.
-        5. Coastal boundary tolerance: allows points immediately on the maritime coastline (within ~2 miles / 0.03 deg)
-           only if strictly closer to the US boundary than to Canada or Mexico.
+        6. Coastal boundary tolerance: accounts for geocoded coastal pier/beach coordinates immediately adjacent
+           to land by scaling latitude degree convergence (Haversine/ellipsoidal approximation: ~2 miles / 3200m).
         """
+        import math
+        if not (isinstance(lat, (int, float)) and math.isfinite(lat) and -90.0 <= lat <= 90.0):
+            return False
+        if not (isinstance(lon, (int, float)) and math.isfinite(lon) and -180.0 <= lon <= 180.0):
+            return False
+
         if country_code and country_code.upper() not in ('USA', 'US', 'UNITED STATES'):
             return False
 

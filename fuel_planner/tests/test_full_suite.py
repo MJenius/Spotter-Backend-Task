@@ -489,3 +489,63 @@ class TestFuelPlannerRigorousSuite:
         with patch.object(RoutePlanningService, 'plan_route', side_effect=RoutingAuthError("401 routing auth")):
             res = client.post('/api/v1/route-plan/', {'start': 'Los Angeles, CA', 'finish': 'Las Vegas, NV'}, format='json')
             assert res.status_code == 502
+
+    # 16. Test geometry coordinate validation & summary > 0 requirement
+    def test_routing_provider_geometry_and_summary_bounds(self):
+        from fuel_planner.services.routing import RoutingSchemaError
+
+        provider = RoutingProvider(api_key="test-key")
+
+        # Zero summary distance
+        bad_zero_dist = {
+            'features': [{
+                'type': 'Feature',
+                'geometry': {'type': 'LineString', 'coordinates': [[-118.0, 34.0], [-117.0, 34.0]]},
+                'properties': {
+                    'summary': {'distance': 0.0, 'duration': 100.0},
+                    'segments': [{'distance': 0.0}]
+                }
+            }]
+        }
+        with patch('requests.post') as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = bad_zero_dist
+            with pytest.raises(RoutingSchemaError) as exc:
+                provider.get_route([(-118.0, 34.0), (-117.0, 34.0)], use_cache=False)
+            assert "positive finite number" in str(exc.value)
+
+        # Invalid geometry coordinates (out of bounds)
+        bad_coords_resp = {
+            'features': [{
+                'type': 'Feature',
+                'geometry': {'type': 'LineString', 'coordinates': [[-195.0, 34.0], [-117.0, 34.0]]},
+                'properties': {
+                    'summary': {'distance': 1000.0, 'duration': 100.0},
+                    'segments': [{'distance': 1000.0}]
+                }
+            }]
+        }
+        with patch('requests.post') as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = bad_coords_resp
+            with pytest.raises(RoutingSchemaError) as exc:
+                provider.get_route([(-118.0, 34.0), (-117.0, 34.0)], use_cache=False)
+            assert "Invalid longitude" in str(exc.value)
+
+    # 17. Test geocoding is_in_us coordinate bounds check
+    def test_geocoding_is_in_us_bounds(self):
+        geo = GeocodingService(api_key="test")
+        assert geo.is_in_us(95.0, -118.0) is False  # Lat > 90
+        assert geo.is_in_us(-95.0, -118.0) is False  # Lat < -90
+        assert geo.is_in_us(34.0, 185.0) is False  # Lon > 180
+        assert geo.is_in_us(34.0, -185.0) is False  # Lon < -180
+        assert geo.is_in_us(float('nan'), -118.0) is False
+        assert geo.is_in_us(34.0, float('inf')) is False
+
+    # 18. Test optimizer station candidate coordinate bounds
+    def test_optimizer_candidate_bounds(self):
+        opt = FuelRouteOptimizer()
+        with pytest.raises(ValueError):
+            opt.optimize(100.0, [StationCandidate("s1", "S1", 95.0, -118.0, Decimal("3.50"), 50.0)])
+        with pytest.raises(ValueError):
+            opt.optimize(100.0, [StationCandidate("s2", "S2", 34.0, 200.0, Decimal("3.50"), 50.0)])

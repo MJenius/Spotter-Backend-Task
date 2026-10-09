@@ -155,6 +155,10 @@ class FuelRouteOptimizer:
         for idx, s in enumerate(candidate_stations):
             if not (math.isfinite(s.route_position_miles) and s.route_position_miles >= 0):
                 raise ValueError(f"Candidate station {s.station_id} at index {idx} has invalid route position {s.route_position_miles}.")
+            if not (math.isfinite(s.latitude) and -90.0 <= s.latitude <= 90.0):
+                raise ValueError(f"Candidate station {s.station_id} at index {idx} has invalid latitude {s.latitude}.")
+            if not (math.isfinite(s.longitude) and -180.0 <= s.longitude <= 180.0):
+                raise ValueError(f"Candidate station {s.station_id} at index {idx} has invalid longitude {s.longitude}.")
             if s.price_per_gallon <= Decimal("0.00") or s.price_per_gallon.is_nan() or s.price_per_gallon.is_infinite():
                 raise ValueError(f"Candidate station {s.station_id} at index {idx} has invalid price {s.price_per_gallon}.")
             if not (math.isfinite(s.access_miles_one_way) and s.access_miles_one_way >= 0):

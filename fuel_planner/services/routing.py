@@ -137,10 +137,10 @@ class RoutingProvider:
             distance_meters = summary.get('distance')
             duration_seconds = summary.get('duration')
 
-            if not (isinstance(distance_meters, (int, float)) and math.isfinite(distance_meters) and distance_meters >= 0):
-                raise RoutingSchemaError(f"Invalid route summary distance: {distance_meters}")
-            if not (isinstance(duration_seconds, (int, float)) and math.isfinite(duration_seconds) and duration_seconds >= 0):
-                raise RoutingSchemaError(f"Invalid route summary duration: {duration_seconds}")
+            if not (isinstance(distance_meters, (int, float)) and math.isfinite(distance_meters) and distance_meters > 0):
+                raise RoutingSchemaError(f"Route summary distance must be a positive finite number, got: {distance_meters}")
+            if not (isinstance(duration_seconds, (int, float)) and math.isfinite(duration_seconds) and duration_seconds > 0):
+                raise RoutingSchemaError(f"Route summary duration must be a positive finite number, got: {duration_seconds}")
 
             distance_miles = distance_meters * METERS_TO_MILES
 
@@ -151,6 +151,15 @@ class RoutingProvider:
             coords = geometry.get('coordinates')
             if not isinstance(coords, list) or len(coords) < 2:
                 raise RoutingSchemaError("Malformed routing geometry: LineString must have at least 2 coordinate points.")
+
+            for c_idx, pt in enumerate(coords):
+                if not (isinstance(pt, (list, tuple)) and len(pt) >= 2):
+                    raise RoutingSchemaError(f"Malformed geometry coordinate at index {c_idx}: expected [lon, lat].")
+                g_lon, g_lat = pt[0], pt[1]
+                if not (isinstance(g_lon, (int, float)) and math.isfinite(g_lon) and -180.0 <= g_lon <= 180.0):
+                    raise RoutingSchemaError(f"Invalid longitude {g_lon} in geometry at index {c_idx}.")
+                if not (isinstance(g_lat, (int, float)) and math.isfinite(g_lat) and -90.0 <= g_lat <= 90.0):
+                    raise RoutingSchemaError(f"Invalid latitude {g_lat} in geometry at index {c_idx}.")
 
             legs_raw = properties.get('segments')
             if not isinstance(legs_raw, list):
@@ -198,4 +207,4 @@ class RoutingProvider:
             return result
         except requests.RequestException as e:
             logger.error(f"HeiGIT routing request error: {e}")
-            raise RoutingError(f"Driving route calculation failed: {str(e)}")
+            raise RoutingError("Driving route calculation failed due to an upstream network or communication error.")
