@@ -4,11 +4,11 @@ from rest_framework import serializers
 class RoutePlanRequestSerializer(serializers.Serializer):
     start = serializers.CharField(
         required=True,
-        help_text="Start location text (e.g. 'Los Angeles, CA') or coordinate string"
+        help_text="Start location text (e.g. 'Los Angeles, CA') or coordinate string 'lat, lon'"
     )
     finish = serializers.CharField(
         required=True,
-        help_text="Destination location text (e.g. 'Las Vegas, NV') or coordinate string"
+        help_text="Destination location text (e.g. 'Las Vegas, NV') or coordinate string 'lat, lon'"
     )
     starting_fuel_gallons = serializers.FloatField(
         required=False,
@@ -23,4 +23,9 @@ class RoutePlanRequestSerializer(serializers.Serializer):
         max_value=25.0,
         default=5.0,
         help_text="Maximum one-way detour distance to consider fuel stations (miles). Default is 5.0."
+    )
+    allow_approximate_stations = serializers.BooleanField(
+        required=False,
+        default=True,
+        help_text="Allow stations enriched at city-centroid accuracy. If false, only exact stations are eligible."
     )

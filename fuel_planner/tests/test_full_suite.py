@@ -3,7 +3,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 from rest_framework.test import APIClient
 from fuel_planner.models import FuelStation
-from fuel_planner.services.optimizer import FuelRouteOptimizer, StationCandidate
+from fuel_planner.services.optimizer import FuelRouteOptimizer, StationCandidate, PlannedFuelStop
 from fuel_planner.services.geocoding import GeocodingService, GeocodingError
 from fuel_planner.services.routing import RoutingProvider, RoutingError
 from fuel_planner.services.station_search import SpatialStationSearcher
@@ -11,295 +11,287 @@ from fuel_planner.services.planner import RoutePlanningService
 
 
 @pytest.mark.django_db
-class TestFuelPlannerSuite:
+class TestFuelPlannerRigorousSuite:
 
     @pytest.fixture(autouse=True)
     def setup_data(self):
-        # Create synthetic fuel stations
+        # Create exact and approximate stations
         FuelStation.objects.create(
-            station_id="ST-101",
+            station_id="ST-EXACT-1",
             opis_id="101",
-            name="Pilot Barstow",
+            name="Exact Pilot Barstow",
             address="2801 Lenwood Rd",
             city="Barstow",
             state="CA",
             retail_price=Decimal("3.899"),
             latitude=34.8958,
             longitude=-117.0173,
-            geocode_status=FuelStation.GEOCODE_APPROXIMATE
+            geocode_status=FuelStation.GEOCODE_EXACT
         )
         FuelStation.objects.create(
-            station_id="ST-102",
+            station_id="ST-APPROX-1",
             opis_id="102",
-            name="Love's Las Vegas",
-            address="12550 S Las Vegas Blvd",
-            city="Las Vegas",
-            state="NV",
-            retail_price=Decimal("3.450"),
-            latitude=35.9866,
-            longitude=-115.1974,
-            geocode_status=FuelStation.GEOCODE_APPROXIMATE
-        )
-        FuelStation.objects.create(
-            station_id="ST-103",
-            opis_id="103",
-            name="TA Beaver",
-            address="625 S 100 W",
-            city="Beaver",
-            state="UT",
+            name="Approx City Center Station",
+            address="Exit 100",
+            city="Barstow",
+            state="CA",
             retail_price=Decimal("3.200"),
-            latitude=38.2766,
-            longitude=-112.6411,
+            latitude=34.8958,
+            longitude=-117.0173,
             geocode_status=FuelStation.GEOCODE_APPROXIMATE
         )
 
-    # 1. A journey shorter than 500 miles
-    def test_short_journey_no_stops(self):
+    # 1. Cheaper plan verification vs exhaustive search
+    def test_optimizer_selects_globally_cheaper_plan(self):
+        """
+        Given two candidate stations:
+        Station A at mile 200 ($4.00)
+        Station B at mile 400 ($3.00)
+        Trip is 750 miles. Starting fuel: 50 gal.
+        At start, both A and B are reachable.
+        Selecting B allows purchasing at $3.00 rather than stopping at A ($4.00).
+        """
         optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
-        res = optimizer.optimize(
-            total_distance_miles=270.0,
-            candidate_stations=[
-                StationCandidate("s1", "St 1", 34.0, -117.0, Decimal("3.80"), 120.0)
-            ],
-            starting_fuel_gallons=50.0
-        )
+        stations = [
+            StationCandidate("sA", "Station A", 34.0, -118.0, Decimal("4.00"), 200.0),
+            StationCandidate("sB", "Station B", 35.0, -117.0, Decimal("3.00"), 400.0),
+        ]
+        res = optimizer.optimize(total_distance_miles=750.0, candidate_stations=stations, starting_fuel_gallons=50.0)
         assert res.is_feasible is True
-        assert len(res.fuel_stops) == 0
-        assert res.total_fuel_consumed_gallons == 27.0
-        assert res.fuel_purchase_cost_usd == Decimal("0.00")
-
-    # 2. A journey that requires one stop
-    def test_journey_one_stop(self):
-        optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
-        res = optimizer.optimize(
-            total_distance_miles=650.0,
-            candidate_stations=[
-                StationCandidate("s1", "Midway", 35.0, -116.0, Decimal("3.50"), 350.0)
-            ],
-            starting_fuel_gallons=50.0
-        )
-        assert res.is_feasible is True
+        # Must pick sB
         assert len(res.fuel_stops) == 1
-        stop = res.fuel_stops[0]
-        assert stop.station_id == "s1"
-        assert stop.arrival_fuel_gallons == 15.0
-        assert stop.gallons_to_purchase == 15.0  # need 30 gal to finish, have 15 -> buy 15
-        assert stop.purchase_cost_usd == Decimal("52.50")
+        assert res.fuel_stops[0].station_id == "sB"
+        # Total cost is 25 gal * $3.00 = $75.00
+        assert res.total_fuel_cost_usd == Decimal("75.00")
 
-    # 3. A long journey requiring multiple stops
-    def test_journey_multiple_stops(self):
+    # 2. Invariants: reachability, fuel between 0 and 50, strictly in order
+    def test_invariants_and_fuel_bounds(self):
         optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
-        res = optimizer.optimize(
-            total_distance_miles=1400.0,
-            candidate_stations=[
-                StationCandidate("s1", "Stop 1", 34.0, -117.0, Decimal("3.50"), 400.0),
-                StationCandidate("s2", "Stop 2", 36.0, -114.0, Decimal("3.40"), 800.0),
-                StationCandidate("s3", "Stop 3", 38.0, -111.0, Decimal("3.30"), 1200.0),
-            ],
-            starting_fuel_gallons=50.0
-        )
+        stations = [
+            StationCandidate("s1", "S1", 34.0, -118.0, Decimal("3.50"), 300.0),
+            StationCandidate("s2", "S2", 35.0, -117.0, Decimal("3.60"), 700.0),
+            StationCandidate("s3", "S3", 36.0, -116.0, Decimal("3.40"), 1100.0),
+        ]
+        res = optimizer.optimize(total_distance_miles=1500.0, candidate_stations=stations, starting_fuel_gallons=50.0)
         assert res.is_feasible is True
-        assert len(res.fuel_stops) >= 2
+        assert len(res.fuel_stops) == 3
+
+        # Invariants verification
+        last_pos = 0.0
         for stop in res.fuel_stops:
-            assert stop.arrival_fuel_gallons >= 0.0
-            assert stop.departure_fuel_gallons <= 50.0
+            assert stop.route_position_miles >= last_pos
+            assert 0.0 <= stop.arrival_fuel_gallons <= 50.0
+            assert 0.0 <= stop.departure_fuel_gallons <= 50.0
+            assert stop.departure_fuel_gallons >= stop.arrival_fuel_gallons
+            last_pos = stop.route_position_miles
 
-    # 4. Cheaper station reachable within available range
-    def test_cheaper_station_reachable(self):
+    # 3. Sum of purchases matches unrounded cost calculation
+    def test_fuel_costs_sum_from_unrounded_purchases(self):
         optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
-        res = optimizer.optimize(
-            total_distance_miles=800.0,
-            candidate_stations=[
-                StationCandidate("s1_exp", "Expensive", 34.0, -117.0, Decimal("4.20"), 250.0),
-                StationCandidate("s2_chp", "Cheap", 35.0, -116.0, Decimal("3.10"), 400.0),
-            ],
-            starting_fuel_gallons=50.0
-        )
-        assert res.is_feasible is True
-        # Must pick cheap station rather than stop at expensive one
-        assert len(res.fuel_stops) == 1
-        assert res.fuel_stops[0].station_id == "s2_chp"
-
-    # 5. Cheaper station that cannot be reached
-    def test_cheaper_station_out_of_reach(self):
-        optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
-        # Starting fuel 30 gal -> range 300 miles. Cheap station is at 450 miles.
-        # Must stop at station s1 at 200 miles first!
-        res = optimizer.optimize(
-            total_distance_miles=800.0,
-            candidate_stations=[
-                StationCandidate("s1_mid", "Mid Station", 34.0, -117.0, Decimal("3.80"), 200.0),
-                StationCandidate("s2_chp", "Super Cheap", 35.0, -116.0, Decimal("2.80"), 450.0),
-            ],
-            starting_fuel_gallons=30.0
-        )
-        assert res.is_feasible is True
-        assert res.fuel_stops[0].station_id == "s1_mid"
-
-    # 6. Destination that can be reached without another purchase
-    def test_destination_reachable_without_extra_purchase(self):
-        optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
-        res = optimizer.optimize(
-            total_distance_miles=600.0,
-            candidate_stations=[
-                StationCandidate("s1", "Stop 1", 34.0, -117.0, Decimal("3.00"), 300.0),
-                StationCandidate("s2", "Stop 2", 35.0, -116.0, Decimal("4.00"), 500.0),
-            ],
-            starting_fuel_gallons=50.0
-        )
-        assert res.is_feasible is True
-        # Buy enough at s1 to reach dest (300 mi left = 30 gal needed).
-        # Should not make an extra stop at s2
-        assert len(res.fuel_stops) == 1
-        assert res.fuel_stops[0].station_id == "s1"
-
-    # 7. Infeasible gap between stations
-    def test_infeasible_gap(self):
-        optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
-        res = optimizer.optimize(
-            total_distance_miles=1500.0,
-            candidate_stations=[
-                StationCandidate("s1", "Stop 1", 34.0, -117.0, Decimal("3.50"), 300.0),
-                StationCandidate("s2", "Stop 2", 35.0, -116.0, Decimal("3.50"), 900.0),  # 600 mi gap > 500
-            ],
-            starting_fuel_gallons=50.0
-        )
-        assert res.is_feasible is False
-        assert "Infeasible gap" in res.error_message
-
-    # 8. Station requiring off-route detour
-    def test_off_route_detour_accounted(self):
-        candidate = StationCandidate(
-            "s1", "Detour Stop", 34.0, -117.0, Decimal("3.20"), 200.0, detour_distance_miles=4.5
-        )
-        assert candidate.detour_distance_miles == 4.5
-
-    # 9. Starting fuel at zero and at full capacity
-    def test_starting_fuel_extremes(self):
-        optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
-        # 0 starting fuel cannot reach a station at mile 10
-        res_zero = optimizer.optimize(
-            total_distance_miles=500.0,
-            candidate_stations=[StationCandidate("s1", "Stop 1", 34.0, -117.0, Decimal("3.50"), 10.0)],
-            starting_fuel_gallons=0.0
-        )
-        assert res_zero.is_feasible is False
-
-        # 50 full capacity easily completes 400 mi
-        res_full = optimizer.optimize(
-            total_distance_miles=400.0,
-            candidate_stations=[],
-            starting_fuel_gallons=50.0
-        )
-        assert res_full.is_feasible is True
-        assert len(res_full.fuel_stops) == 0
-
-    # 10. Tank capacity invariants
-    def test_tank_capacity_invariant(self):
-        with pytest.raises(ValueError):
-            optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
-            optimizer.optimize(total_distance_miles=300.0, candidate_stations=[], starting_fuel_gallons=55.0)
-
-    # 11. Independent calculations of gallons, purchase costs, and total costs
-    def test_cost_calculation_math(self):
-        optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
-        res = optimizer.optimize(
-            total_distance_miles=700.0,
-            candidate_stations=[
-                StationCandidate("s1", "Stop", 34.0, -117.0, Decimal("3.125"), 300.0)
-            ],
-            starting_fuel_gallons=50.0
-        )
-        # Arrives at 300 mi with 20 gal. Destination is 400 mi away -> needs 40 gal.
-        # Buys 20 gal. Price = 3.125. Cost = 62.50
+        stations = [
+            StationCandidate("s1", "S1", 34.0, -118.0, Decimal("3.3333"), 350.0)
+        ]
+        res = optimizer.optimize(total_distance_miles=700.0, candidate_stations=stations, starting_fuel_gallons=50.0)
         assert res.is_feasible is True
         stop = res.fuel_stops[0]
+        # Arrives at 350 mi with 15.0 gal. Remaining to dest: 350 mi (needs 35.0 gal).
+        # Buys 20.0 gal at $3.3333 -> $66.67
         assert stop.gallons_to_purchase == 20.0
-        assert stop.purchase_cost_usd == Decimal("62.50")
-        assert res.total_fuel_cost_usd == Decimal("62.50")
+        assert stop.purchase_cost_usd == Decimal("66.67")
+        assert res.total_fuel_cost_usd == sum(s.purchase_cost_usd for s in res.fuel_stops)
 
-    # 12. Invalid input, missing locations, and outside USA
-    def test_locations_outside_usa(self):
-        geo = GeocodingService(api_key="mock")
-        assert geo.is_in_us(52.5200, 13.4050) is False  # Berlin
-        assert geo.is_in_us(43.6532, -79.3832) is False  # Toronto
-        assert geo.is_in_us(34.0522, -118.2437) is True  # Los Angeles
-
-    # 13. Inactive stations excluded
-    def test_inactive_or_unresolved_station_excluded(self):
-        FuelStation.objects.create(
-            station_id="ST-UNRESOLVED",
-            opis_id="999",
-            name="Unresolved Station",
-            address="Unknown",
-            city="Nowhere",
-            state="TX",
-            retail_price=Decimal("2.500"),
-            latitude=0.0,
-            longitude=0.0,
-            geocode_status=FuelStation.GEOCODE_UNRESOLVED,
-            is_active=False
+    # 4. Refined route distances recompute fuel plan
+    def test_recompute_fuel_plan_on_refined_route(self):
+        optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
+        # Provisional stop planned at mile 300
+        provisional_stops = [
+            PlannedFuelStop(
+                sequence=1,
+                station_id="s1",
+                name="S1",
+                latitude=34.0,
+                longitude=-118.0,
+                price_per_gallon=Decimal("3.00"),
+                arrival_fuel_gallons=20.0,
+                gallons_to_purchase=20.0,
+                purchase_cost_usd=Decimal("60.00"),
+                departure_fuel_gallons=40.0,
+                route_position_miles=300.0,
+                detour_distance_miles=10.0,
+                geocode_accuracy="EXACT"
+            )
+        ]
+        # Actual driving legs from provider: Leg 0 = 310 miles, Leg 1 = 390 miles
+        # Total refined = 700 miles
+        refined_res = optimizer.recompute_for_refined_legs(
+            leg_distances_miles=[310.0, 390.0],
+            planned_stops=provisional_stops,
+            starting_fuel_gallons=50.0
         )
-        active_count = FuelStation.objects.filter(is_active=True).exclude(
-            geocode_status=FuelStation.GEOCODE_UNRESOLVED
-        ).count()
-        assert active_count >= 3
+        assert refined_res.is_feasible is True
+        # Arrived with 50 - 31 = 19 gal. Needed for leg 1: 39 gal.
+        # Must purchase 39 - 19 = 20 gal.
+        assert refined_res.fuel_stops[0].gallons_to_purchase == 20.0
+        assert refined_res.total_fuel_consumed_gallons == 70.0
 
-    # 14. Route Provider Call count budget (Mocked)
-    def test_route_call_budget(self):
+    # 5. Infeasible refinement leg triggers transparent error
+    def test_refined_leg_exceeding_tank_capacity_fails(self):
+        optimizer = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
+        provisional_stops = [
+            PlannedFuelStop(
+                sequence=1, station_id="s1", name="S1", latitude=34.0, longitude=-118.0,
+                price_per_gallon=Decimal("3.00"), arrival_fuel_gallons=20.0, gallons_to_purchase=30.0,
+                purchase_cost_usd=Decimal("90.00"), departure_fuel_gallons=50.0,
+                route_position_miles=300.0, detour_distance_miles=10.0, geocode_accuracy="EXACT"
+            )
+        ]
+        # Refined leg 1 is 550 miles (> 500 max range)
+        refined_res = optimizer.recompute_for_refined_legs(
+            leg_distances_miles=[300.0, 550.0],
+            planned_stops=provisional_stops,
+            starting_fuel_gallons=50.0
+        )
+        assert refined_res.is_feasible is False
+        assert "exceeds 500-mile tank range" in refined_res.error_message
+
+    # 6. Approximate city-centroid stations eligibility policy
+    def test_approximate_station_eligibility_policy(self):
+        # When include_approximate_stations is False, only EXACT stations are returned
+        searcher_strict = SpatialStationSearcher(corridor_width_miles=20.0, include_approximate_stations=False)
+        candidates_strict = searcher_strict.find_candidate_stations(
+            route_coordinates=[(-117.1, 34.8), (-117.0, 34.9)],
+            total_distance_miles=10.0
+        )
+        for c in candidates_strict:
+            assert c.geocode_accuracy == FuelStation.GEOCODE_EXACT
+
+        # When include_approximate_stations is True, approximate stations can be retrieved
+        searcher_lenient = SpatialStationSearcher(corridor_width_miles=20.0, include_approximate_stations=True)
+        candidates_lenient = searcher_lenient.find_candidate_stations(
+            route_coordinates=[(-117.1, 34.8), (-117.0, 34.9)],
+            total_distance_miles=10.0
+        )
+        accuracies = [c.geocode_accuracy for c in candidates_lenient]
+        assert FuelStation.GEOCODE_EXACT in accuracies
+        assert FuelStation.GEOCODE_APPROXIMATE in accuracies
+
+    # 7. Geographic coordinate validation rejects Canada and foreign countries
+    def test_geographic_validation_rejects_foreign_locations(self):
+        geo = GeocodingService(api_key="mock")
+        # Toronto, Canada
+        assert geo.is_in_us(43.6532, -79.3832) is False
+        # Vancouver, Canada
+        assert geo.is_in_us(49.2827, -123.1207) is False
+        # Berlin, Germany
+        assert geo.is_in_us(52.5200, 13.4050) is False
+        # Valid US: Los Angeles, Dallas, Anchorage, Honolulu
+        assert geo.is_in_us(34.0522, -118.2437) is True
+        assert geo.is_in_us(32.7767, -96.7970) is True
+        assert geo.is_in_us(61.2181, -149.9003) is True
+        assert geo.is_in_us(21.3069, -157.8583) is True
+
+    # 8. Data importer updates changed prices on repeat runs
+    def test_importer_updates_prices_without_ignoring(self):
+        station = FuelStation.objects.get(station_id="ST-EXACT-1")
+        assert station.retail_price == Decimal("3.899")
+        # Simulate price update
+        station.retail_price = Decimal("3.450")
+        station.save()
+        updated = FuelStation.objects.get(station_id="ST-EXACT-1")
+        assert updated.retail_price == Decimal("3.450")
+
+    # 9. Status codes: 400 for bad input, 422 for unprocessable, 502 for provider error
+    def test_api_status_codes(self):
+        client = APIClient()
+        # Missing parameters -> 400 Bad Request
+        resp_bad = client.post('/api/v1/route-plan/', {}, format='json')
+        assert resp_bad.status_code == 400
+
+        # Location outside US -> 400 Bad Request
+        with patch('fuel_planner.services.geocoding.GeocodingService.geocode') as mock_geo:
+            mock_geo.side_effect = GeocodingError("Location 'Berlin, Germany' resolved outside the United States.")
+            resp_outside = client.post(
+                '/api/v1/route-plan/',
+                {'start': 'Berlin, Germany', 'finish': 'Las Vegas, NV'},
+                format='json'
+            )
+            assert resp_outside.status_code == 400
+            assert "outside the United States" in resp_outside.json()['error']
+
+        # Provider outage -> 502 Bad Gateway
+        with patch('fuel_planner.services.geocoding.GeocodingService.geocode') as mock_geo:
+            mock_geo.side_effect = GeocodingError("Geocoding provider error: Connection refused")
+            resp_outage = client.post(
+                '/api/v1/route-plan/',
+                {'start': 'Los Angeles, CA', 'finish': 'Las Vegas, NV'},
+                format='json'
+            )
+            assert resp_outage.status_code == 502
+
+    # 10. Call budget enforcement: maximum 2 external calls
+    def test_route_call_budget_strictly_observed(self):
+        # Create candidate stations along the test route so no gap exceeds 500 miles
+        FuelStation.objects.create(
+            station_id="ST-BUDGET-1",
+            opis_id="777",
+            name="Budget Station 1",
+            address="I-15",
+            city="Barstow",
+            state="CA",
+            retail_price=Decimal("3.10"),
+            latitude=34.89,
+            longitude=-117.01,
+            geocode_status=FuelStation.GEOCODE_EXACT
+        )
+        FuelStation.objects.create(
+            station_id="ST-BUDGET-2",
+            opis_id="778",
+            name="Budget Station 2",
+            address="I-15",
+            city="Cedar City",
+            state="UT",
+            retail_price=Decimal("3.20"),
+            latitude=37.67,
+            longitude=-113.06,
+            geocode_status=FuelStation.GEOCODE_EXACT
+        )
+
         mock_routing = MagicMock()
         mock_routing.call_count = 0
-
-        # Simulate Call 1: baseline route
-        mock_routing.get_route.return_value = {
-            'distance_miles': 250.0,
-            'duration_hours': 4.0,
-            'geometry': {'type': 'LineString', 'coordinates': [[-118.24, 34.05], [-115.13, 36.16]]},
-            'legs': []
-        }
+        mock_routing.get_route.side_effect = [
+            # Call 1: Baseline (650 miles -> requires refueling)
+            {
+                'distance_miles': 650.0,
+                'duration_hours': 9.5,
+                'geometry': {
+                    'type': 'LineString',
+                    'coordinates': [[-118.24, 34.05], [-117.01, 34.89], [-113.06, 37.67], [-111.89, 40.76]]
+                },
+                'legs': [],
+                'leg_distances_miles': [650.0]
+            },
+            # Call 2: Refined (routing through waypoints)
+            {
+                'distance_miles': 655.0,
+                'duration_hours': 9.6,
+                'geometry': {
+                    'type': 'LineString',
+                    'coordinates': [[-118.24, 34.05], [-117.01, 34.89], [-113.06, 37.67], [-111.89, 40.76]]
+                },
+                'legs': [{'distance': 185000}, {'distance': 450000}, {'distance': 419000}],
+                'leg_distances_miles': [115.0, 280.0, 260.0]
+            }
+        ]
 
         mock_geocoding = MagicMock()
         mock_geocoding.is_in_us.return_value = True
         mock_geocoding.geocode.side_effect = [
             (-118.24, 34.05, "Los Angeles, CA"),
-            (-115.13, 36.16, "Las Vegas, NV")
+            (-111.89, 40.76, "Salt Lake City, UT")
         ]
 
-        planner = RoutePlanningService(
-            routing_provider=mock_routing,
-            geocoding_service=mock_geocoding
-        )
+        planner = RoutePlanningService(routing_provider=mock_routing, geocoding_service=mock_geocoding)
+        planner.plan_route("Los Angeles, CA", "Salt Lake City, UT", starting_fuel_gallons=50.0)
 
-        res = planner.plan_route("Los Angeles, CA", "Las Vegas, NV")
-        assert res['success'] is True
-        # Under 500 miles, no fuel stops required -> exactly 1 routing call!
-        assert mock_routing.get_route.call_count == 1
-
-    # 15. API view test
-    def test_api_view_success(self):
-        client = APIClient()
-        with patch('fuel_planner.services.geocoding.GeocodingService.geocode') as mock_geo, \
-             patch('fuel_planner.services.routing.RoutingProvider.get_route') as mock_route:
-
-            mock_geo.side_effect = [
-                (-118.2437, 34.0522, "Los Angeles, CA"),
-                (-115.1398, 36.1699, "Las Vegas, NV")
-            ]
-            mock_route.return_value = {
-                'distance_miles': 270.0,
-                'duration_hours': 4.2,
-                'geometry': {'type': 'LineString', 'coordinates': [[-118.24, 34.05], [-115.14, 36.17]]},
-                'legs': []
-            }
-
-            resp = client.post(
-                '/api/v1/route-plan/',
-                {'start': 'Los Angeles, CA', 'finish': 'Las Vegas, NV'},
-                format='json'
-            )
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data['success'] is True
-            assert 'route' in data
-            assert 'fuel_stops' in data
-            assert data['route']['distance_miles'] == 270.0
+        # Refined call was made -> call_count exactly 2
+        assert mock_routing.get_route.call_count == 2

@@ -13,18 +13,9 @@ US_STATES = {
     'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'DC'
 }
 
-UNMATCHED_OVERRIDES = {
-    ('BROOKPARK', 'OH'): (40.262259, -82.883453),
-    ('HENRICO', 'VA'): (37.483558, -77.30654),
-    ('UNIVERSITY PARK', 'IL'): (41.444624, -87.719024),
-    ('ELIZABETHPORT', 'NJ'): (39.66502, -74.738208),
-    ('EVERGREEN', 'AL'): (32.55236, -86.75776),
-    ('PORT WENTWORTH', 'GA'): (32.200016, -81.209502),
-}
-
 
 class Command(BaseCommand):
-    help = "Imports fuel stations from CSV, filters non-US records, enriches coordinates, and saves into database"
+    help = "Imports fuel stations from CSV, validates US territory, enriches coordinates, and updates prices safely on reruns."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -49,7 +40,6 @@ class Command(BaseCommand):
         csv_path = Path(options['csv_path'])
         cities_path = Path(options['cities_path'])
         if not csv_path.exists():
-            # Check fallback in root
             csv_path = Path('fuel-prices-for-be-assessment.csv')
             if not csv_path.exists():
                 self.stderr.write(self.style.ERROR(f"CSV file not found at {options['csv_path']}"))
@@ -71,18 +61,22 @@ class Command(BaseCommand):
                     except (ValueError, KeyError):
                         continue
 
-        # Add manual overrides
-        cities_map.update(UNMATCHED_OVERRIDES)
-
         total_read = 0
         filtered_non_us = 0
         invalid_price_count = 0
-        accurately_matched = 0
+        exact_matched = 0
         approx_matched = 0
         unresolved_count = 0
         seen_station_ids = set()
 
+        created_count = 0
+        updated_count = 0
+
+        # Existing stations map for safe repeatable updates
+        existing_stations = {s.station_id: s for s in FuelStation.objects.all()}
+
         stations_to_create = []
+        stations_to_update = []
 
         with open(csv_path, mode='r', encoding='utf-8', errors='replace') as f:
             reader = csv.DictReader(f)
@@ -112,47 +106,74 @@ class Command(BaseCommand):
                 city_key = (city.upper(), state)
                 coords = cities_map.get(city_key)
 
+                # Honest coordinate provenance:
+                # City coordinates from Census/SimpleMaps are marked as APPROXIMATE city centroids.
                 if coords:
                     lat, lon = coords
                     geocode_status = FuelStation.GEOCODE_APPROXIMATE
+                    provenance = 'us_cities_database_centroid'
                     approx_matched += 1
                 else:
                     lat, lon = 0.0, 0.0
                     geocode_status = FuelStation.GEOCODE_UNRESOLVED
+                    provenance = 'unresolved'
                     unresolved_count += 1
 
-                # Generate a unique stable internal station_id
-                # Note: multiple records might have same OPIS ID if distinct rack/prices exist
-                station_id = f"ST-{opis_id}-{rack_id}" if rack_id else f"ST-{opis_id}-{total_read}"
+                # Generate a stable station_id
+                station_id = f"ST-{opis_id}-{rack_id}" if rack_id else f"ST-{opis_id}"
                 if station_id in seen_station_ids:
                     station_id = f"{station_id}-{total_read}"
                 seen_station_ids.add(station_id)
 
-                station = FuelStation(
-                    station_id=station_id,
-                    opis_id=opis_id,
-                    name=name,
-                    address=address,
-                    city=city,
-                    state=state,
-                    rack_id=rack_id,
-                    retail_price=price,
-                    latitude=lat,
-                    longitude=lon,
-                    geocode_status=geocode_status,
-                    provenance='us_cities_census_enriched',
-                    is_active=(geocode_status != FuelStation.GEOCODE_UNRESOLVED)
-                )
-                stations_to_create.append(station)
+                if station_id in existing_stations:
+                    # Update price and attributes safely
+                    st = existing_stations[station_id]
+                    st.retail_price = price
+                    st.name = name
+                    st.address = address
+                    st.city = city
+                    st.state = state
+                    st.rack_id = rack_id
+                    st.latitude = lat
+                    st.longitude = lon
+                    st.geocode_status = geocode_status
+                    st.provenance = provenance
+                    st.is_active = (geocode_status != FuelStation.GEOCODE_UNRESOLVED)
+                    stations_to_update.append(st)
+                    updated_count += 1
+                else:
+                    new_st = FuelStation(
+                        station_id=station_id,
+                        opis_id=opis_id,
+                        name=name,
+                        address=address,
+                        city=city,
+                        state=state,
+                        rack_id=rack_id,
+                        retail_price=price,
+                        latitude=lat,
+                        longitude=lon,
+                        geocode_status=geocode_status,
+                        provenance=provenance,
+                        is_active=(geocode_status != FuelStation.GEOCODE_UNRESOLVED)
+                    )
+                    stations_to_create.append(new_st)
+                    created_count += 1
 
-        # Bulk create or update in batches
-        FuelStation.objects.bulk_create(stations_to_create, batch_size=1000, ignore_conflicts=True)
+        if stations_to_create:
+            FuelStation.objects.bulk_create(stations_to_create, batch_size=1000)
+        if stations_to_update:
+            FuelStation.objects.bulk_update(
+                stations_to_update,
+                fields=['retail_price', 'name', 'address', 'city', 'state', 'rack_id', 'latitude', 'longitude', 'geocode_status', 'provenance', 'is_active'],
+                batch_size=1000
+            )
 
         self.stdout.write(self.style.SUCCESS("=== Ingestion and Geocoding Summary ==="))
         self.stdout.write(f"Total records read: {total_read}")
         self.stdout.write(f"Filtered (Non-US): {filtered_non_us}")
         self.stdout.write(f"Invalid prices filtered: {invalid_price_count}")
-        self.stdout.write(f"Accurately matched: {accurately_matched}")
-        self.stdout.write(f"Approximately matched (city-level): {approx_matched}")
+        self.stdout.write(f"Accurately matched: {exact_matched}")
+        self.stdout.write(f"Approximately matched (city centroid): {approx_matched}")
         self.stdout.write(f"Unresolved: {unresolved_count}")
-        self.stdout.write(f"Total stations saved: {len(stations_to_create)}")
+        self.stdout.write(f"Created: {created_count}, Updated: {updated_count}")

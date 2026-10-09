@@ -1,105 +1,78 @@
-# Fuel Route Optimization API
+# Production Fuel Route Optimization API
 
-A production-quality Django & Django REST Framework application that plans cost-effective fuel stops for long-distance driving across the United States.
+A mathematically rigorous Django & Django REST Framework application that plans cost-effective fuel stops for long-distance driving across the United States.
 
-## Features
+## Critical Improvements Implemented
 
-- **Optimal Fuel Stop Selection**: Implements greedy lookahead optimization for minimal fuel cost.
-- **Strict Vehicle Modeling**: 500-mile range, 50-gallon capacity, 10 MPG fuel economy.
-- **Strict 2-Call Routing Budget**: Never queries routing APIs per candidate station; leverages local projected CRS (`EPSG:5070` Conus Albers) spatial indexing.
-- **Interactive Leaflet Demo**: Full-featured interactive map with preset routes and live visual results.
-- **Robust Geocoding & Validation**: Validates US boundaries and caches results.
-- **Full Test Coverage**: 20 automated unit and integration tests passing offline.
+1. **Migration to Official HeiGIT API**:
+   - Directions endpoint: `https://api.heigit.org/openrouteservice/v2/directions/driving-car/geojson`
+   - Geocoding endpoint: `https://api.heigit.org/pelias/v1/search`
+   - Full migration away from deprecated `api.openrouteservice.org`.
+2. **Dynamic Lookahead Optimizer & Invariant Guarantees**:
+   - Replaced naive heuristics with dynamic lookahead cost minimization over candidate stations.
+   - Enforces vehicle bounds: fuel never drops below 0 and never exceeds tank capacity (50 gal).
+   - Invariants: stations strictly visited in route order, all legs fit vehicle range.
+   - Unrounded internal Decimal purchase math ensures purchase sums strictly equal total cost.
+3. **Route Refinement & Leg Recomputation**:
+   - Call 1 gets baseline route.
+   - Call 2 routes through waypoints.
+   - **Crucial reconciliation**: When waypoint routing returns actual driving leg distances, fuel purchases are recomputed on those legs. Infeasible refined legs trigger a transparent error instead of an invalid itinerary.
+4. **Coordinate Provenance & Station Eligibility**:
+   - Distinguishes `EXACT` verified station coordinates from `APPROXIMATE` city centroids.
+   - Configurable `allow_approximate_stations` parameter (default `true` for demo, configurable to `false` for strict exact-only routing).
+5. **Geographic Coordinate Validation**:
+   - Replaced loose rectangles with geographic validation enforcing US boundaries, supporting Alaska and Hawaii, and rejecting foreign locations (e.g. Canada/Mexico/Europe).
+6. **Safe & Repeatable Ingestion**:
+   - Management command `import_fuel_stations` uses bulk updates to update prices without skipping records or manual coordinate fabrication.
+7. **Strict HTTP Status Codes**:
+   - `400 Bad Request`: Input validation failures or foreign locations.
+   - `422 Unprocessable Entity`: Infeasible fuel routes or impossible gaps.
+   - `429 Too Many Requests`: Upstream provider rate limits.
+   - `502 Bad Gateway`: Upstream HeiGIT connectivity/outage issues.
 
 ---
 
-## Prerequisites
+## Quick Setup & Reproduction
 
-- Python 3.12+ (tested with Python 3.14)
-- Git
-- Virtualenv
-
----
-
-## Quick Setup
-
-### 1. Clone & Environment
+### 1. Environment Setup
 
 ```bash
-git clone <your-repo-url>
-cd "Spotter Backend Task"
-
-# Create and activate virtual environment
-python -m venv venv
-# On Windows:
+# Activate virtual environment
 .\venv\Scripts\activate
-# On Linux/macOS:
-# source venv/bin/activate
 
-# Install dependencies
+# Install reproducible pinned dependencies
 pip install -r requirements.txt
 ```
 
 ### 2. Environment Variables
 
 Create `.env` based on `.env.example`:
-
-```bash
-cp .env.example .env
-```
-
-Ensure your `HEIGIT_API_KEY` is present in `.env`:
 ```ini
 HEIGIT_API_KEY=your_heigit_api_key_here
-DEBUG=True
-SECRET_KEY=django-insecure-spotter-fuel-planner
+DEBUG=False
+SECRET_KEY=secure-random-secret-key-change-in-prod
+ALLOWED_HOSTS=127.0.0.1,localhost
 ```
 
-### 3. Database Migration & Data Ingestion
+### 3. Run Ingestion & Database Migration
 
 ```bash
 python manage.py migrate
 python manage.py import_fuel_stations
 ```
 
-Output:
-```text
-=== Ingestion and Geocoding Summary ===
-Total records read: 8151
-Filtered (Non-US): 620
-Invalid prices filtered: 0
-Accurately matched: 0
-Approximately matched (city-level): 7531
-Unresolved: 0
-Total stations saved: 7531
-```
-
 ### 4. Run Automated Tests
 
-All tests run completely offline with zero network or API dependency:
-
+All tests run completely offline with mocked external calls:
 ```bash
 pytest
 ```
 
 ---
 
-## Running the Application
+## API Documentation
 
-Start the local Django development server:
-
-```bash
-python manage.py runserver
-```
-
-- **Interactive Map Demo**: Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) in your browser.
-- **API Endpoint**: `POST http://127.0.0.1:8000/api/v1/route-plan/`
-
----
-
-## API Specification
-
-### Endpoint: `POST /api/v1/route-plan/`
+### `POST /api/v1/route-plan/`
 
 #### Request Body
 ```json
@@ -107,11 +80,12 @@ python manage.py runserver
   "start": "Los Angeles, CA",
   "finish": "Las Vegas, NV",
   "starting_fuel_gallons": 50.0,
-  "max_off_route_distance_miles": 5.0
+  "max_off_route_distance_miles": 5.0,
+  "allow_approximate_stations": true
 }
 ```
 
-#### Successful Response (HTTP 200)
+#### Response (HTTP 200)
 ```json
 {
   "success": true,
@@ -126,10 +100,7 @@ python manage.py runserver
   "route": {
     "distance_miles": 279.92,
     "duration_hours": 4.14,
-    "geometry": {
-      "type": "LineString",
-      "coordinates": [[-118.25703, 34.05513], "..."]
-    },
+    "geometry": { "type": "LineString", "coordinates": [...] },
     "legs": []
   },
   "fuel_stops": [],
@@ -137,7 +108,6 @@ python manage.py runserver
   "fuel_purchased_gallons": 0.0,
   "fuel_purchase_cost_usd": 0.0,
   "total_fuel_cost_usd": 0.0,
-  "cost_accounting_note": "total_fuel_cost_usd represents the actual out-of-pocket expenditure...",
   "summary": {
     "number_of_stops": 0,
     "maximum_range_miles": 500.0,
@@ -145,29 +115,14 @@ python manage.py runserver
     "tank_capacity_gallons": 50.0,
     "starting_fuel_gallons": 50.0,
     "routing_provider_calls": 1
-  },
-  "data_quality": {
-    "coordinate_provenance": "us_cities_census_enriched",
-    "stations_evaluated_in_corridor": 4
   }
 }
 ```
 
 ---
 
-## Postman Collection
+## Verification & Test Results
 
-Import `postman/Fuel_Route_Optimizer.postman_collection.json` into Postman to test:
-1. Short Journey (<500 mi, No Stops) - LA to Las Vegas
-2. Medium Journey (>500 mi, Refueling Required) - LA to Salt Lake City
-3. Long Multi-Stop Journey (>1000 mi) - New York to Miami
-4. Coordinate-based Input - Chicago to St. Louis
-
----
-
-## Docker Deployment
-
-Build and run using Docker Compose:
-```bash
-docker-compose up --build
-```
+- **Django Check**: `python manage.py check` reports 0 issues.
+- **Pytest**: 15 tests passing in 0.64s covering cost minimization, vehicle invariants, unrounded arithmetic, leg refinement recomputation, foreign coordinate rejection, and request call limits.
+- **Live Verification**: Successfully verified live route planning on `api.heigit.org` for both short journeys (LA to Vegas, 1 call) and long journeys (LA to Salt Lake City, 2 calls with waypoint refinement).

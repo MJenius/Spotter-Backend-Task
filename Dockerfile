@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -19,4 +19,5 @@ COPY . /app/
 
 EXPOSE 8000
 
+# Production-grade WSGI server via gunicorn or standard runserver for demonstration
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]

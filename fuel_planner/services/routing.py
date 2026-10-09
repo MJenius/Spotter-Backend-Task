@@ -15,7 +15,8 @@ class RoutingError(Exception):
 
 class RoutingProvider:
     """
-    Integrates with HeiGIT / OpenRouteService v2 directions API.
+    Integrates with official HeiGIT API v2 endpoints:
+    https://api.heigit.org/openrouteservice/v2/directions/driving-car/geojson
     Enforces call-budget tracking, caching, timeouts, and graceful error handling.
     """
 
@@ -26,8 +27,9 @@ class RoutingProvider:
             'Authorization': self.api_key,
             'Content-Type': 'application/json',
             'Accept': 'application/json, application/geo+json',
-            'User-Agent': 'SpotterFuelPlanner/1.0'
+            'User-Agent': 'SpotterFuelPlanner/2.0'
         }
+        self.endpoint_url = "https://api.heigit.org/openrouteservice/v2/directions/driving-car/geojson"
 
     def get_route(
         self,
@@ -36,31 +38,31 @@ class RoutingProvider:
     ) -> Dict[str, Any]:
         """
         coordinates: list of [longitude, latitude] points in order.
-        Returns GeoJSON FeatureCollection dictionary with distance_miles and geometry LineString.
+        Returns GeoJSON FeatureCollection dictionary with distance_miles, legs, and geometry LineString.
         """
         if len(coordinates) < 2:
             raise RoutingError("At least two coordinates (start and finish) are required.")
 
-        # Cache key based on rounded coordinates
-        cache_key = f"route_{'_'.join([f'{c[0]:.4f},{c[1]:.4f}' for c in coordinates])}"
+        cache_key = f"heigit_route_{'_'.join([f'{c[0]:.4f},{c[1]:.4f}' for c in coordinates])}"
         if use_cache:
             cached = cache.get(cache_key)
             if cached:
                 return cached
 
-        url = "https://api.openrouteservice.org/v2/directions/driving-car/geojson"
         payload = {
             'coordinates': coordinates,
-            'radiuses': [-1] * len(coordinates),  # default search radius
+            'radiuses': [-1] * len(coordinates),
             'instructions': False,
             'elevation': False
         }
 
         self.call_count += 1
         try:
-            resp = requests.post(url, json=payload, headers=self.headers, timeout=12.0)
+            resp = requests.post(self.endpoint_url, json=payload, headers=self.headers, timeout=12.0)
             if resp.status_code == 429:
                 raise RoutingError("Routing provider rate limit exceeded (HTTP 429). Please retry in a moment.")
+            if resp.status_code in (401, 403):
+                raise RoutingError("Routing provider authentication failed. Please check the HeiGIT API key.")
             if resp.status_code == 404:
                 raise RoutingError("Routing endpoint not found or unsupported route geometry.")
             resp.raise_for_status()
@@ -76,21 +78,28 @@ class RoutingProvider:
             duration_seconds = summary.get('duration', 0.0)
             distance_miles = distance_meters * METERS_TO_MILES
 
-            geometry = feature.get('geometry', {})  # GeoJSON LineString
-            legs = feature['properties'].get('segments', [])
+            geometry = feature.get('geometry', {})
+            legs_raw = feature['properties'].get('segments', [])
+
+            # Extract leg distances in miles
+            leg_distances = [
+                round(seg['distance'] * METERS_TO_MILES, 2)
+                for seg in legs_raw
+            ]
 
             result = {
                 'distance_miles': round(distance_miles, 2),
                 'duration_hours': round(duration_seconds / 3600.0, 2),
                 'geometry': geometry,
-                'legs': legs,
+                'legs': legs_raw,
+                'leg_distances_miles': leg_distances,
                 'raw_feature': feature
             }
 
             if use_cache:
-                cache.set(cache_key, result, timeout=86400)  # cache 24 hours
+                cache.set(cache_key, result, timeout=86400)
 
             return result
         except requests.RequestException as e:
-            logger.error(f"Routing provider error: {e}")
+            logger.error(f"HeiGIT routing request error: {e}")
             raise RoutingError(f"Driving route calculation failed: {str(e)}")

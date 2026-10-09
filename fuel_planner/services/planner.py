@@ -12,13 +12,14 @@ logger = logging.getLogger(__name__)
 
 class RoutePlanningService:
     """
-    Orchestrates:
-    1. Geocoding start and finish (if given as text) or parsing coords.
-    2. Route Provider Call 1: Baseline route & geometry.
-    3. Spatial Corridor Search: Finding candidate fuel stations.
-    4. Optimizer: Optimal stop selection & purchase plan.
-    5. Route Provider Call 2 (Refinement): Route with waypoints to reflect actual driving detours.
-    6. Response assembly with strict API call tracking and cost accounting.
+    Coordinates end-to-end fuel-route optimization:
+    1. Geocodes Start & Finish or validates explicit coordinates.
+    2. Call 1 (Baseline): Obtains driving geometry & baseline distance.
+    3. Spatial Corridor Search: Filters candidate stations with exact vs approximate policy.
+    4. Optimizer (Provisional Plan): Solves lookahead cost-minimal refueling sequence.
+    5. Call 2 (Refinement): Reroutes through exact selected station waypoints.
+    6. Recomputes & verifies fuel purchases against ACTUAL refined driving legs.
+       Returns an error if the refined itinerary becomes infeasible.
     """
 
     def __init__(
@@ -32,7 +33,8 @@ class RoutePlanningService:
         self.geocoding_service = geocoding_service or GeocodingService()
         self.station_searcher = station_searcher or SpatialStationSearcher(
             corridor_width_miles=10.0,
-            max_off_route_distance_miles=getattr(settings, 'MAX_OFF_ROUTE_DISTANCE_MILES', 5.0)
+            max_off_route_distance_miles=getattr(settings, 'MAX_OFF_ROUTE_DISTANCE_MILES', 5.0),
+            include_approximate_stations=True  # Can be configured per request
         )
         self.optimizer = optimizer or FuelRouteOptimizer(
             tank_capacity_gallons=getattr(settings, 'TANK_CAPACITY_GALLONS', 50.0),
@@ -44,7 +46,8 @@ class RoutePlanningService:
         start_input: Any,
         finish_input: Any,
         starting_fuel_gallons: Optional[float] = None,
-        max_off_route_distance: Optional[float] = None
+        max_off_route_distance: Optional[float] = None,
+        allow_approximate_stations: bool = True
     ) -> Dict[str, Any]:
         starting_fuel = (
             starting_fuel_gallons
@@ -54,6 +57,7 @@ class RoutePlanningService:
 
         if max_off_route_distance is not None:
             self.station_searcher.max_off_route_distance_miles = max_off_route_distance
+        self.station_searcher.include_approximate_stations = allow_approximate_stations
 
         # Step 1: Resolve Coordinates
         start_lon, start_lat, start_label = self._resolve_location(start_input, "start")
@@ -71,7 +75,17 @@ class RoutePlanningService:
             total_distance_miles=baseline_distance
         )
 
-        # Step 4: Optimization
+        if not candidates and baseline_distance > (starting_fuel * self.optimizer.fuel_economy_mpg):
+            return {
+                'success': False,
+                'error': (
+                    "No eligible fuel stations found along the route corridor. "
+                    "If approximate city-level stations are excluded, none have verified exact coordinates."
+                ),
+                'routing_provider_calls': self.routing_provider.call_count
+            }
+
+        # Step 4: Initial Optimization Plan
         opt_result: OptimizationResult = self.optimizer.optimize(
             total_distance_miles=baseline_distance,
             candidate_stations=candidates,
@@ -85,8 +99,10 @@ class RoutePlanningService:
                 'routing_provider_calls': self.routing_provider.call_count
             }
 
-        # Step 5: Route Refinement (Call 2 if stops exist)
+        # Step 5: Route Refinement & Recomputation (Call 2 if stops exist)
         final_route = baseline_route
+        final_opt_result = opt_result
+
         if opt_result.fuel_stops:
             waypoint_coords = [(start_lon, start_lat)]
             for stop in opt_result.fuel_stops:
@@ -94,13 +110,36 @@ class RoutePlanningService:
             waypoint_coords.append((finish_lon, finish_lat))
 
             try:
-                # Call 2: Refined route visiting actual station locations
                 refined_route = self.routing_provider.get_route(waypoint_coords)
                 final_route = refined_route
-            except Exception as e:
-                logger.warning(f"Refinement route failed ({e}), falling back to baseline route with estimated detours.")
 
-        # Serialize fuel stops
+                # Critical Fix: Recompute and validate fuel purchases on ACTUAL refined legs!
+                leg_distances = refined_route.get('leg_distances_miles', [])
+                if len(leg_distances) == len(opt_result.fuel_stops) + 1:
+                    recomputed_result = self.optimizer.recompute_for_refined_legs(
+                        leg_distances_miles=leg_distances,
+                        planned_stops=opt_result.fuel_stops,
+                        starting_fuel_gallons=starting_fuel
+                    )
+                    if not recomputed_result.is_feasible:
+                        return {
+                            'success': False,
+                            'error': (
+                                f"Refined route through recommended stops became infeasible: "
+                                f"{recomputed_result.error_message}"
+                            ),
+                            'routing_provider_calls': self.routing_provider.call_count
+                        }
+                    final_opt_result = recomputed_result
+            except RoutingError as e:
+                logger.warning(f"Refinement routing call failed: {e}. Aborting with error.")
+                return {
+                    'success': False,
+                    'error': f"Failed to calculate refined driving route through waypoints: {str(e)}",
+                    'routing_provider_calls': self.routing_provider.call_count
+                }
+
+        # Serialize verified fuel stops
         fuel_stops_data = [
             {
                 'sequence': s.sequence,
@@ -112,14 +151,15 @@ class RoutePlanningService:
                 'latitude': s.latitude,
                 'longitude': s.longitude,
                 'price_per_gallon': float(s.price_per_gallon),
-                'arrival_fuel_gallons': s.arrival_fuel_gallons,
-                'gallons_to_purchase': s.gallons_to_purchase,
+                'arrival_fuel_gallons': round(s.arrival_fuel_gallons, 2),
+                'gallons_to_purchase': round(s.gallons_to_purchase, 2),
                 'purchase_cost_usd': float(s.purchase_cost_usd),
-                'departure_fuel_gallons': s.departure_fuel_gallons,
-                'route_position_miles': s.route_position_miles,
-                'detour_distance_miles': s.detour_distance_miles,
+                'departure_fuel_gallons': round(s.departure_fuel_gallons, 2),
+                'route_position_miles': round(s.route_position_miles, 2),
+                'detour_distance_miles': round(s.detour_distance_miles, 2),
+                'geocode_accuracy': s.geocode_accuracy
             }
-            for s in opt_result.fuel_stops
+            for s in final_opt_result.fuel_stops
         ]
 
         total_distance = final_route['distance_miles']
@@ -137,12 +177,12 @@ class RoutePlanningService:
             },
             'fuel_stops': fuel_stops_data,
             'fuel_consumed_gallons': total_fuel_consumed,
-            'fuel_purchased_gallons': opt_result.total_gallons_purchased,
-            'fuel_purchase_cost_usd': float(opt_result.fuel_purchase_cost_usd),
-            'total_fuel_cost_usd': float(opt_result.total_fuel_cost_usd),
+            'fuel_purchased_gallons': final_opt_result.total_gallons_purchased,
+            'fuel_purchase_cost_usd': float(final_opt_result.fuel_purchase_cost_usd),
+            'total_fuel_cost_usd': float(final_opt_result.total_fuel_cost_usd),
             'cost_accounting_note': (
-                "total_fuel_cost_usd represents the actual out-of-pocket expenditure for fuel purchases planned at recommended stations along this journey. "
-                f"Assumes departure with {starting_fuel} gallons pre-existing in the tank."
+                "total_fuel_cost_usd reflects the exact sum of fuel purchases planned at recommended stations along the refined itinerary. "
+                f"Assumes vehicle departs origin with {starting_fuel} gallons."
             ),
             'summary': {
                 'number_of_stops': len(fuel_stops_data),
@@ -153,8 +193,9 @@ class RoutePlanningService:
                 'routing_provider_calls': self.routing_provider.call_count
             },
             'data_quality': {
-                'coordinate_provenance': 'us_cities_census_enriched',
-                'stations_evaluated_in_corridor': len(candidates),
+                'candidate_stations_in_corridor': len(candidates),
+                'approximate_stations_permitted': allow_approximate_stations,
+                'note': "Fuel prices taken directly from OPIS CSV dataset. Station locations are based on city/highway enrichment."
             }
         }
 
@@ -162,17 +203,16 @@ class RoutePlanningService:
         if isinstance(loc, (list, tuple)) and len(loc) == 2:
             lon, lat = float(loc[0]), float(loc[1])
             if not self.geocoding_service.is_in_us(lat, lon):
-                raise GeocodingError(f"{label_prefix} coordinates ({lat}, {lon}) are outside the United States.")
+                raise GeocodingError(f"{label_prefix.title()} coordinates ({lat}, {lon}) are outside the United States.")
             return lon, lat, f"{label_prefix.title()} ({lat:.4f}, {lon:.4f})"
 
         if isinstance(loc, dict) and 'lat' in loc and 'lon' in loc:
             lat, lon = float(loc['lat']), float(loc['lon'])
             if not self.geocoding_service.is_in_us(lat, lon):
-                raise GeocodingError(f"{label_prefix} coordinates ({lat}, {lon}) are outside the United States.")
+                raise GeocodingError(f"{label_prefix.title()} coordinates ({lat}, {lon}) are outside the United States.")
             return lon, lat, f"{label_prefix.title()} ({lat:.4f}, {lon:.4f})"
 
         if isinstance(loc, str):
-            # Check if format is "lat, lon"
             if ',' in loc:
                 parts = [p.strip() for p in loc.split(',')]
                 if len(parts) == 2:

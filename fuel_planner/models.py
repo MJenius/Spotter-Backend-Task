@@ -7,8 +7,8 @@ class FuelStation(models.Model):
     GEOCODE_UNRESOLVED = 'UNRESOLVED'
 
     GEOCODE_STATUS_CHOICES = [
-        (GEOCODE_EXACT, 'Exact Address/Exit Match'),
-        (GEOCODE_APPROXIMATE, 'Approximate City Match'),
+        (GEOCODE_EXACT, 'Verified Station Coordinates (Eligible)'),
+        (GEOCODE_APPROXIMATE, 'Approximate City Centroid (Ineligible by default)'),
         (GEOCODE_UNRESOLVED, 'Unresolved'),
     ]
 
@@ -37,7 +37,8 @@ class FuelStation(models.Model):
         indexes = [
             models.Index(fields=['latitude', 'longitude']),
             models.Index(fields=['state', 'retail_price']),
+            models.Index(fields=['geocode_status', 'is_active']),
         ]
 
     def __str__(self):
-        return f"{self.name} ({self.city}, {self.state}) - ${self.retail_price}/gal"
+        return f"{self.name} ({self.city}, {self.state}) - ${self.retail_price}/gal [{self.geocode_status}]"

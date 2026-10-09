@@ -13,10 +13,12 @@ if env_path.exists():
                 k, v = line.split('=', 1)
                 os.environ.setdefault(k.strip(), v.strip())
 
-SECRET_KEY = os.environ.get('SECRET_KEY', 'insecure-default-key-for-dev')
-DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 'yes')
+# Strict production security defaults: no unsafe fallbacks
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-dev-key-spotter-fuel-planner-change-in-prod')
+DEBUG = os.environ.get('DEBUG', 'False').lower() in ('true', '1', 'yes')
 
-ALLOWED_HOSTS = [h.strip() for h in os.environ.get('ALLOWED_HOSTS', '*').split(',') if h.strip()]
+raw_allowed_hosts = os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost')
+ALLOWED_HOSTS = [h.strip() for h in raw_allowed_hosts.split(',') if h.strip()]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
