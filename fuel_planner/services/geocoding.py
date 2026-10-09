@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 import requests
 from typing import Tuple, Dict, Any, Optional
@@ -8,6 +9,8 @@ from django.conf import settings
 from django.core.cache import cache
 from shapely.geometry import shape, Point
 from shapely.ops import unary_union
+import pyproj
+from shapely import transform
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +19,18 @@ BOUNDARY_FILE = Path(settings.BASE_DIR) / 'data' / 'us_boundary.geojson'
 US_POLYGON = None
 CAN_POLYGON = None
 MEX_POLYGON = None
+
+# Regional metric transformers for uniform geodesic/projected distance checks
+TRANSFORMER_CONUS = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True).transform
+TRANSFORMER_ALASKA = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3338", always_xy=True).transform
+TRANSFORMER_HAWAII = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3759", always_xy=True).transform
+
+US_POLYGON_CONUS = None
+US_POLYGON_ALASKA = None
+US_POLYGON_HAWAII = None
+
+CAN_POLYGON_CONUS = None
+MEX_POLYGON_CONUS = None
 
 if BOUNDARY_FILE.exists():
     try:
@@ -33,6 +48,15 @@ if BOUNDARY_FILE.exists():
                         MEX_POLYGON = geom
             elif 'geometry' in b_data:
                 US_POLYGON = shape(b_data['geometry'])
+
+        if US_POLYGON is not None:
+            US_POLYGON_CONUS = transform(US_POLYGON, TRANSFORMER_CONUS, interleaved=False)
+            US_POLYGON_ALASKA = transform(US_POLYGON, TRANSFORMER_ALASKA, interleaved=False)
+            US_POLYGON_HAWAII = transform(US_POLYGON, TRANSFORMER_HAWAII, interleaved=False)
+        if CAN_POLYGON is not None:
+            CAN_POLYGON_CONUS = transform(CAN_POLYGON, TRANSFORMER_CONUS, interleaved=False)
+        if MEX_POLYGON is not None:
+            MEX_POLYGON_CONUS = transform(MEX_POLYGON, TRANSFORMER_CONUS, interleaved=False)
     except Exception as e:
         logger.warning(f"Could not load US GeoJSON boundary: {e}")
 
@@ -175,12 +199,36 @@ class GeocodingService:
         if US_POLYGON.covers(pt):
             return True
 
-        # 3. Coastal maritime edge tolerance: within ~2 miles of coastline and closer to US than foreign land
-        d_us = US_POLYGON.distance(pt)
-        d_can = CAN_POLYGON.distance(pt) if CAN_POLYGON is not None else float('inf')
-        d_mex = MEX_POLYGON.distance(pt) if MEX_POLYGON is not None else float('inf')
+        # 3. Coastal maritime edge tolerance: within a uniform 3,200 meters (~2 miles) of coastline
+        # and strictly closer to the US boundary than to Canada or Mexico.
+        # Uses region-appropriate planar equal-area metric projections for true geodesic/metric distance.
+        if lat >= 50.0 and lon <= -128.0:
+            # Alaska (EPSG:3338)
+            trans = TRANSFORMER_ALASKA
+            us_poly = US_POLYGON_ALASKA
+            can_poly = None
+            mex_poly = None
+        elif lat <= 25.0 and lon <= -150.0:
+            # Hawaii (EPSG:3759)
+            trans = TRANSFORMER_HAWAII
+            us_poly = US_POLYGON_HAWAII
+            can_poly = None
+            mex_poly = None
+        else:
+            # CONUS (EPSG:5070)
+            trans = TRANSFORMER_CONUS
+            us_poly = US_POLYGON_CONUS
+            can_poly = CAN_POLYGON_CONUS
+            mex_poly = MEX_POLYGON_CONUS
 
-        if d_us < 0.03 and d_us < d_can and d_us < d_mex:
-            return True
+        if us_poly is not None:
+            pt_proj = transform(pt, trans, interleaved=False)
+            d_us_meters = us_poly.distance(pt_proj)
+            d_can_meters = can_poly.distance(pt_proj) if can_poly is not None else float('inf')
+            d_mex_meters = mex_poly.distance(pt_proj) if mex_poly is not None else float('inf')
+
+            # 3,200 meters (~2 miles) uniform geodesic/metric tolerance
+            if d_us_meters < 3200.0 and d_us_meters < d_can_meters and d_us_meters < d_mex_meters:
+                return True
 
         return False

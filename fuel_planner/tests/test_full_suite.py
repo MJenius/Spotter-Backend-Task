@@ -549,3 +549,43 @@ class TestFuelPlannerRigorousSuite:
             opt.optimize(100.0, [StationCandidate("s1", "S1", 95.0, -118.0, Decimal("3.50"), 50.0)])
         with pytest.raises(ValueError):
             opt.optimize(100.0, [StationCandidate("s2", "S2", 34.0, 200.0, Decimal("3.50"), 50.0)])
+
+    # 19. Test coastal metric tolerance with projected coordinates
+    def test_geocoding_coastal_metric_tolerance(self):
+        geo = GeocodingService(api_key="test")
+        # Point right off Santa Monica Pier (approx 500m off coastline, in Pacific Ocean)
+        # Should be within 3,200m coastal tolerance and closer to US than MEX/CAN
+        assert geo.is_in_us(34.008, -118.502) is True
+
+        # Point 10 miles (16,000m) off coastline into the ocean
+        # Should be rejected because distance exceeds 3,200m
+        assert geo.is_in_us(33.85, -118.70) is False
+
+    # 20. Test display-rounded fuel gallons vs charged cost reconciliation
+    def test_optimizer_display_quantities_and_cost_reconciliation(self):
+        """
+        Verify that even when gallons_to_purchase is rounded to 4 decimals for display,
+        purchase_cost_usd is computed from the exact unrounded Fraction and matches the
+        total charged fuel cost to the penny.
+        """
+        opt = FuelRouteOptimizer(tank_capacity_gallons=50.0, fuel_economy_mpg=10.0)
+        # 700-mile trip: starts with 50 gal, needs to buy at mile 300 and 500
+        stations = [
+            StationCandidate("s1", "Station 1", 34.0, -117.0, Decimal("3.1234"), 300.0),
+            StationCandidate("s2", "Station 2", 35.0, -115.0, Decimal("3.5678"), 500.0),
+        ]
+        res = opt.optimize(700.0, stations, starting_fuel_gallons=50.0)
+        assert res.is_feasible is True
+        assert len(res.fuel_stops) > 0
+
+        # Sum of per-stop purchase costs equals total_fuel_cost_usd exactly
+        sum_stop_costs = sum((s.purchase_cost_usd for s in res.fuel_stops), Decimal("0.00"))
+        assert res.total_fuel_cost_usd == sum_stop_costs
+        assert res.fuel_purchase_cost_usd == sum_stop_costs
+
+        for s in res.fuel_stops:
+            # Displayed gallons is a float rounded to 4 decimals
+            assert round(s.gallons_to_purchase, 4) == s.gallons_to_purchase
+            # Check difference between displayed product (gallons * price) and actual charged cost is < $0.01
+            naive_display_cost = Decimal(str(round(s.gallons_to_purchase * float(s.price_per_gallon), 2)))
+            assert abs(s.purchase_cost_usd - naive_display_cost) <= Decimal("0.01")

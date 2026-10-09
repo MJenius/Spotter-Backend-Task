@@ -70,6 +70,16 @@ class StationCandidate:
 
 @dataclass
 class PlannedFuelStop:
+    """
+    Represents an optimized refueling stop along the route.
+
+    Note on rounding policy:
+    Internal optimization uses exact Fraction arithmetic. In the returned record,
+    fuel volumes (arrival_fuel_gallons, gallons_to_purchase, departure_fuel_gallons)
+    and route_position_miles are rounded for presentation (gallons to 4 decimals, miles to 2 decimals).
+    The financial purchase_cost_usd is computed from the exact unrounded purchase Fraction and rounded
+    to the nearest cent (ROUND_HALF_UP).
+    """
     sequence: int
     station_id: str
     name: str
@@ -90,6 +100,14 @@ class PlannedFuelStop:
 
 @dataclass
 class OptimizationResult:
+    """
+    Result of the exact DP optimization.
+
+    Note on financial consistency:
+    fuel_purchase_cost_usd and total_fuel_cost_usd reflect the exact sum of the per-stop
+    purchase_cost_usd values charged to the customer, ensuring zero penny discrepancies
+    between the itemized stop list and reported invoice totals.
+    """
     is_feasible: bool
     fuel_stops: List[PlannedFuelStop]
     total_fuel_consumed_gallons: float

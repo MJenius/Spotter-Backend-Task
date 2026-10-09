@@ -164,11 +164,11 @@ pytest -v
 ```
 
 **Results:**
-- **277 passing unit, integration, and brute-force tests** covering:
+- **279 passing unit, integration, and brute-force tests** covering:
   - 250 randomized network scenarios mathematically verifying that the exact DP optimizer matches independent combinatorial brute-force solutions under totally unimodular interval constraints.
   - Strict invariants: vehicle fuel levels within $[0, 50]$ gallons at all points, stops strictly visited in route order.
   - Access distance charging and off-route detour evaluation.
-  - Unrounded Decimal fuel purchase summation and invariant checks.
+  - Unrounded Decimal fuel purchase summation and invariant checks, with explicit tests verifying that display-rounded quantities (gallons to 4 decimals, miles to 2 decimals) match the invoice total to the penny.
   - Refined route leg distance recomputation and sequence reconciliation.
   - Rejection of malformed, mismatched, non-positive, or non-finite refined legs and geometries.
   - Full coordinate bounds validation (finite, physical latitude/longitude) across geocoding, geometry points, and candidate fuel stations.
@@ -178,5 +178,5 @@ pytest -v
   - Typed exception mapping (`GeocodingRateLimitError`, `RoutingAuthError`, etc.) to accurate HTTP status codes (400, 422, 429, 502).
   - Strict default exclusion of approximate stations in serializers, views, and planner services.
   - Production `SECRET_KEY` validation preventing insecure defaults when `DEBUG=False`.
-  - Geospatial validation using official US boundary GeoJSON with high-resolution sovereign boundary checks (USA, Canada, and Mexico) correctly discriminating close border pairs (Detroit vs Windsor, Buffalo vs Fort Erie, San Diego vs Tijuana, Alaska, Hawaii, and ocean coordinates).
+  - Geospatial validation using official US boundary GeoJSON with high-resolution sovereign boundary checks (USA, Canada, and Mexico) correctly discriminating close border pairs (Detroit vs Windsor, Buffalo vs Fort Erie, San Diego vs Tijuana, Alaska, Hawaii, and ocean coordinates) with uniform metric projected coastal tolerances (3,200m via regional Albers Equal Area projections).
   - Call budget limit enforcement ($\le 2$ directions-routing calls).
