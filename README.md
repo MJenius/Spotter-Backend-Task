@@ -1,6 +1,6 @@
-# Production Fuel Route Optimization API
+# Fuel Route Optimization API
 
-A mathematically grounded, production-hardened Django REST Framework service that plans cost-effective fuel stops for long-distance highway trips across the United States.
+A mathematically grounded Django REST Framework service that plans cost-effective fuel stops for long-distance highway trips across the United States.
 
 ---
 
@@ -180,3 +180,32 @@ pytest -v
   - Production `SECRET_KEY` validation preventing insecure defaults when `DEBUG=False`.
   - Geospatial validation using official US boundary GeoJSON with high-resolution sovereign boundary checks (USA, Canada, and Mexico) correctly discriminating close border pairs (Detroit vs Windsor, Buffalo vs Fort Erie, San Diego vs Tijuana, Alaska, Hawaii, and ocean coordinates) with uniform metric projected coastal tolerances (3,200m via regional Albers Equal Area projections).
   - Call budget limit enforcement ($\le 2$ directions-routing calls).
+
+---
+
+## 5. Repeatable Demo Procedure
+
+For live recording and evaluation readiness:
+
+### Scenario A: Short Route (Single-Tank, No Stops Needed)
+- **Start**: `Los Angeles, CA`
+- **Destination**: `Las Vegas, NV`
+- **Starting Fuel**: `50.0` gal
+- **Allow Approximate Stations**: `false` (unchecked)
+- **Expected Outcome**:
+  - Distance: ~`279.9` miles
+  - Stops: `0`
+  - Fuel Consumed: `27.99` gal
+  - Cost: `$0.00` (within single-tank range of 500 miles)
+
+### Scenario B: Multi-Stop Highway Trip (Refueling Stops Needed)
+- **Start**: `Los Angeles, CA`
+- **Destination**: `Salt Lake City, UT`
+- **Starting Fuel**: `50.0` gal
+- **Allow Approximate Stations**: `true` (checked)
+- **Expected Outcome**:
+  - Distance: ~`716` miles
+  - Stops: `2` (e.g. Barstow, CA and North Las Vegas, NV)
+  - Cost: ~$68.79
+  - UI shows interactive stop markers with unit price ($/gal), exact purchase quantity, and waypoint route geometry.
+

@@ -37,6 +37,12 @@
         .alert { padding: 12px; border-radius: 6px; margin-bottom: 12px; font-size: 0.85rem; }
         .alert-error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
         .alert-info { background: #e0f2fe; color: #075985; border: 1px solid #bae6fd; }
+
+        @media (max-width: 768px) {
+            body { flex-direction: column; overflow: auto; }
+            #sidebar { width: 100%; height: auto; border-right: none; border-bottom: 1px solid #e2e8f0; }
+            #map { min-height: 400px; height: 50vh; }
+        }
     </style>
 </head>
 <body>
@@ -113,7 +119,13 @@
             const finish = document.getElementById('finishInput').value.trim();
             const rawFuel = document.getElementById('startingFuel').value.trim();
             const parsedFuel = parseFloat(rawFuel);
-            const startingFuel = (!isNaN(parsedFuel) && parsedFuel >= 0 && parsedFuel <= 50) ? parsedFuel : 50.0;
+
+            if (isNaN(parsedFuel) || parsedFuel < 0 || parsedFuel > 50) {
+                alert('Please enter a valid starting fuel amount between 0 and 50 gallons.');
+                document.getElementById('startingFuel').focus();
+                return;
+            }
+            const startingFuel = parsedFuel;
 
             const allowApprox = document.getElementById('allowApprox').checked;
 

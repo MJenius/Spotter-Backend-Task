@@ -171,7 +171,7 @@ class GeocodingService:
         5. Accept if point is covered by US sovereign boundary (US_POLYGON covers), which includes Continental US,
            Alaska, and Hawaii polygons.
         6. Coastal boundary tolerance: accounts for geocoded coastal pier/beach coordinates immediately adjacent
-           to land by scaling latitude degree convergence (Haversine/ellipsoidal approximation: ~2 miles / 3200m).
+           to land using projected metric distances (CONUS EPSG:5070, Alaska EPSG:3338, Hawaii EPSG:3759; tolerance: 3200m / ~2 miles).
         """
         import math
         if not (isinstance(lat, (int, float)) and math.isfinite(lat) and -90.0 <= lat <= 90.0):
