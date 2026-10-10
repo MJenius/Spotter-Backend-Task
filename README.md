@@ -183,9 +183,34 @@ pytest -v
 
 ---
 
-## 5. Repeatable Demo Procedure
+## 5. How to Run the Live Demo
 
-For live recording and evaluation readiness:
+### 1. Start the Demo Application
+Ensure `.env` exists with your `HEIGIT_API_KEY`, migrations are applied, and stations are loaded:
+```bash
+# 1. Activate your virtual environment
+.\venv\Scripts\activate      # Windows
+# or: source venv/bin/activate  # Linux/macOS
+
+# 2. Run migrations and import fuel stations (if not already done)
+python manage.py migrate
+python manage.py import_fuel_stations
+
+# 3. Start the local server
+python manage.py runserver 127.0.0.1:8000
+```
+Alternatively, using Docker Compose:
+```bash
+docker-compose up --build
+```
+
+### 2. Open the Interactive Map
+Navigate in your browser to:
+[http://127.0.0.1:8000/](http://127.0.0.1:8000/)
+
+---
+
+## 6. Repeatable Demo Scenarios
 
 ### Scenario A: Short Route (Single-Tank, No Stops Needed)
 - **Start**: `Los Angeles, CA`
@@ -208,4 +233,5 @@ For live recording and evaluation readiness:
   - Stops: `2` (e.g. Barstow, CA and North Las Vegas, NV)
   - Cost: ~$68.79
   - UI shows interactive stop markers with unit price ($/gal), exact purchase quantity, and waypoint route geometry.
+
 

@@ -88,9 +88,9 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script>
         const map = L.map('map').setView([39.8283, -98.5795], 4);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
             maxZoom: 19,
-            attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            attribution: 'Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom'
         }).addTo(map);
 
         let routeLayerGroup = L.layerGroup().addTo(map);
@@ -151,7 +151,17 @@
                     })
                 });
 
-                const data = await response.json();
+                const contentType = response.headers.get('content-type') || '';
+                let data = null;
+
+                if (contentType.includes('application/json')) {
+                    data = await response.json();
+                } else {
+                    const text = await response.text();
+                    resultsDiv.innerHTML = `<div class="alert alert-error"><strong>Server Error (${response.status}):</strong> ${escapeHtml(text.slice(0, 300))}</div>`;
+                    return;
+                }
+
                 if (!response.ok || !data.success) {
                     const err = data.error || (data.errors ? JSON.stringify(data.errors) : (data.message || 'Route calculation failed'));
                     resultsDiv.innerHTML = `<div class="alert alert-error"><strong>Error:</strong> ${escapeHtml(err)}</div>`;
@@ -160,7 +170,7 @@
 
                 renderResults(data);
             } catch (e) {
-                resultsDiv.innerHTML = `<div class="alert alert-error"><strong>Connection Error:</strong> ${escapeHtml(e.message)}</div>`;
+                resultsDiv.innerHTML = `<div class="alert alert-error"><strong>Connection Error:</strong> ${escapeHtml(e.message)}<br><small style="color:#64748b;">Make sure the Django server is running (e.g. <code>python manage.py runserver</code>) on this host and port.</small></div>`;
             } finally {
                 btn.disabled = false;
                 btn.innerText = 'Calculate Fuel Route';
